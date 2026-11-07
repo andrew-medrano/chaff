@@ -149,7 +149,8 @@ What this shows, and what it does not:
 ### Can real and fake flyovers be told apart? [R]
 
 A classifier on per-flyover features (detection score, line width, contrast, second harmonic, flicker, broadband
-level, ridge deviation, asymmetry, and the fitted blade rate, speed and distance). "Real" means a flyover confirmed against ADS-B. Area under the ROC curve: 0.5 is chance, 1.0 separates them fully.
+level, ridge deviation, asymmetry, and the fitted blade rate, speed and distance). "Real" means a flyover confirmed
+against ADS-B. Area under the ROC curve: 0.5 is chance, 1.0 separates them fully.
 
 | Attacker's training data | Test AUC |
 |---|---|

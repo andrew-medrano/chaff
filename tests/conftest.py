@@ -46,3 +46,40 @@ def stacks(planes):
 def catalog_path(stacks, tmp_path_factory):
     from chaff import stack
     return stack.save(stacks, tmp_path_factory.mktemp("cat") / "cat.npz")
+
+
+SRC = __import__("pathlib").Path(__import__("chaff").__file__).resolve().parents[1]
+
+
+def run_py(*args, **kw):
+    """`python ARGS` in a fresh process, with this checkout's chaff first on the path."""
+    import os
+    import subprocess
+    import sys
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(SRC), *filter(None, [os.environ.get("PYTHONPATH")])]))
+    return subprocess.run([sys.executable, *map(str, args)], capture_output=True, text=True, env=env, **kw)
+
+
+def run_cli(*args, **kw):
+    """`python -m chaff ARGS`: the real command-line path, including the macOS self-restart."""
+    return run_py("-m", "chaff", *args, **kw)
+
+
+@pytest.fixture
+def stub_detector(monkeypatch):
+    """Replace dopplertrack's detector by one that 'finds' the given events (always runs; the
+    real detector is exercised in test_detect.py). Returns a setter: stub_detector(events)."""
+    from types import SimpleNamespace
+    from chaff import detect
+
+    class Spec:
+        def __init__(self, t, f, S):
+            self.t = t
+
+    def install(events):
+        def detect_events(sp, f_lo, f_hi, top=15, workers=None):
+            return [SimpleNamespace(**e, score=100.0 - i, burst=0.0) for i, e in enumerate(events)
+                    if sp.t[0] <= e["t_cpa"] <= sp.t[-1]]
+        monkeypatch.setattr(detect, "available", lambda: True)
+        monkeypatch.setattr(detect, "_api", lambda: (Spec, detect_events))
+    return install

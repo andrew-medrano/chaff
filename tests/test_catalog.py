@@ -90,3 +90,38 @@ def test_not_a_catalog(tmp_path):
     np.save(tmp_path / "arr.npy", np.zeros(3))
     with pytest.raises(ValueError, match="not a chaff catalog"):
         stack.load(tmp_path / "arr.npy")
+
+
+class _Trap:
+    """Unpickling this creates a file: proof that a catalog load never unpickles."""
+    path = None
+
+    def __reduce__(self):
+        return (open, (self.path, "w"))
+
+
+def test_pickle_payload_is_never_run(tmp_path):
+    trap = tmp_path / "unpickled"
+    _Trap.path = str(trap)
+    for extra in ({}, dict(format=np.array(stack.FORMAT), version=np.array(stack.FORMAT_VERSION))):
+        p = tmp_path / "evil.npz"
+        np.savez(p, meta=np.array([_Trap()], dtype=object), **extra)
+        with pytest.raises(ValueError):
+            stack.load(p)
+        assert not trap.exists()
+
+
+def test_other_format_version_is_refused(stacks, tmp_path):
+    p = stack.save(stacks, tmp_path / "cat")            # .npz is added
+    assert p.endswith("cat.npz")
+    with np.load(p, allow_pickle=False) as z:
+        d = dict(z)
+    d["version"] = np.array(stack.FORMAT_VERSION + 1)
+    np.savez(tmp_path / "newer.npz", **d)
+    with pytest.raises(ValueError, match=f"format {stack.FORMAT_VERSION + 1}"):
+        stack.load(tmp_path / "newer.npz")
+
+
+def test_empty_catalog_round_trip(tmp_path):
+    p = stack.save([], tmp_path / "empty.npz")
+    assert stack.load(p) == []

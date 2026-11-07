@@ -206,7 +206,10 @@ def _run(source, write, catalog, seed, lead, quiet, synthetic, synth_opts, worke
         notes = []
         stacks = extract_stacks(source, n, floor, events, log=run.log, notes=notes)
         rep["catalog"] = dict(source="self (flyovers detected in this recording)", detected=len(events),
-                              stacks=len(stacks), usable=sum(k.usable for k in stacks), notes=notes)
+                              stacks=len(stacks), usable=sum(k.usable for k in stacks), notes=notes,
+                              events=events,
+                              used=[dict(name=k.name, f0=k.f0, n_lines=k.n_lines, iso_snr_db=k.iso_snr_db)
+                                    for k in stacks if k.usable])
         if not any(k.usable for k in stacks):
             run.warn(f"no flyover in this recording has a clear engine-line stack ({len(events)} detected; "
                      f"{_describe(stacks)}): falling back to synthetic decoys, which are easier to tell from "

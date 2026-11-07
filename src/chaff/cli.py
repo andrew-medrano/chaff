@@ -193,9 +193,12 @@ def entry():
     On macOS the system allocator keeps up to ~1.5 GB of freed large blocks cached for reuse, and
     a decoy run frees many of them, so the process looks (and is) far bigger than what it holds.
     MallocLargeCache=0 turns that cache off; it must be set before the process starts, so the
-    command re-executes itself once with it."""
-    if sys.platform == "darwin" and "MallocLargeCache" not in os.environ:
-        env = dict(os.environ, MallocLargeCache="0")
+    command re-executes itself once with it. Detection worker processes get the default back:
+    they hold little, and without the cache they spend much of their time in page faults."""
+    if os.environ.pop("_CHAFF_REEXEC", None):
+        os.environ.pop("MallocLargeCache", None)      # this process is set; its workers are not
+    elif sys.platform == "darwin" and "MallocLargeCache" not in os.environ:
+        env = dict(os.environ, MallocLargeCache="0", _CHAFF_REEXEC="1")
         try:
             os.execve(sys.executable, [sys.executable, "-m", "chaff", *sys.argv[1:]], env)
         except OSError:

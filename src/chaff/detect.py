@@ -11,6 +11,9 @@ Install it with `pip install "chaff[detect]"`.
 """
 from __future__ import annotations
 
+import warnings
+from concurrent.futures.process import BrokenProcessPool
+
 import numpy as np
 
 from .noise import A_N, A_SR, Frames
@@ -91,7 +94,16 @@ class Detector:
             self.log(f"  finding flyovers in {t[0] / 3600:.2f}-{t[n - 1] / 3600:.2f} h")
         if t[n - 1] - t[0] > 120:
             sp = self.Spectrogram(t[:n], self.frames.f, whiten(L[:, :n], HOP / A_SR))
-            for e in self.detect_events(sp, BAND[0], BAND[1], top=self.top, workers=self.workers):
+            try:
+                found = self.detect_events(sp, BAND[0], BAND[1], top=self.top, workers=self.workers)
+            except BrokenProcessPool:
+                # worker processes could not start: typically a script without an
+                # `if __name__ == "__main__":` guard (macOS and Windows start workers by importing it)
+                warnings.warn("parallel flyover detection failed (does your script lack an "
+                              "`if __name__ == '__main__':` guard?); continuing in one process", RuntimeWarning)
+                self.workers = 1
+                found = self.detect_events(sp, BAND[0], BAND[1], top=self.top, workers=1)
+            for e in found:
                 self.events.append(dict(t_cpa=float(e.t_cpa), f0=float(e.f0), v=float(e.v), d=float(e.d),
                                         score=float(e.score), burst=float(getattr(e, "burst", 0.0))))
             del sp

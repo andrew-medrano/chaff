@@ -1,6 +1,10 @@
-"""Fake propeller flyovers: physically consistent Doppler curves, drawn from real aircraft types
-and then stretched, shrunk and pitch-shifted, with harmonics, rendered just under the level the
-ear could pick out of the recording's own background.
+"""Synthetic propeller flyovers: physically consistent Doppler curves, drawn from real aircraft
+types and then stretched, shrunk and pitch-shifted, with harmonics, rendered just under the level
+the ear could pick out of the recording's own background.
+
+These are the fallback when no catalog of real flyovers is available. They are simpler than the
+whole-stack decoys in stack.py (a fundamental and up to three harmonics, no engine-order lines),
+so they are easier to tell from real flyovers.
 """
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ from dataclasses import dataclass, field, asdict
 import numpy as np
 import scipy.signal as ss
 
-from .noise import ENBW_HZ, F_MAX, NoiseFloor, erb_hz, to_rate
+from .noise import ENBW_HZ, F_MAX, K_MASK_DB, NoiseFloor, erb_hz
 
 C = 340.6            # speed of sound at 15 C, m/s
 SYN_SR = 2000        # decoys live below 1 kHz, so they are built at 2 kHz and resampled once
@@ -22,12 +26,9 @@ REALISM = dict(
     fade_db=2.0, fade_corr_s=15.0,          # slow level drift
     harm_db=(-18.0, -8.0),                  # harmonics 2.. relative to the fundamental
 )
-K_MASK_DB = -4.0     # a tone in noise becomes audible near -4 dB re the noise in one ERB (Moore);
-                     # higher (harder to hear) at low frequency, so this is the conservative end
-
 # Blade-passing frequency (rpm x blades / 60) and cruise/approach speed of common propeller types.
 # Decoys start from one of these and are then stretched, shrunk and shifted.
-CATALOG = {
+AIRCRAFT_TYPES = {
     "two-blade piston (Cessna 172, PA-28)":  dict(bpf=(72, 92),   v=(45, 65),   harm_db=(-3, -6, -10)),
     "two-blade piston, fast (Bonanza, Mooney)": dict(bpf=(80, 92), v=(60, 85),   harm_db=(-2, -5, -9)),
     "three-blade piston (SR22, Bonanza A36)": dict(bpf=(118, 140), v=(65, 95),   harm_db=(-4, -8, -12)),
@@ -47,8 +48,9 @@ class Decoy:
     below_db: float = 6.0  # how far under the audibility threshold the fundamental peaks
     seed: int = 0
     kind: str = ""
-    origin: str = "catalog"   # catalog | template
+    origin: str = "aircraft-type"   # aircraft-type | template
     broadband_db: float = 0.0  # engine/propeller roar: how much it lifts the 450-950 Hz band at closest approach
+    tier: str = "synthetic"
 
     def to_dict(self):
         return asdict(self)
@@ -82,13 +84,13 @@ def _smooth_noise(rng, n, corr):
 def sample_decoys(duration_s, per_hour=60.0, f_band=(55.0, 330.0), d_range=(500.0, 7000.0),
                   templates=None, template_share=0.5, below_db=(4.0, 9.0), seed=0, edge_s=120.0,
                   broadband_db=(0.0, 0.0)):
-    """Random flyovers across the recording. Each starts from a CATALOG type (or, with
+    """Random flyovers across the recording. Each starts from an AIRCRAFT_TYPES entry (or, with
     `templates`, from a curve the caller measured in this very recording) and is then
     stretched in time (distance), shrunk or stretched in sweep (speed) and shifted in pitch.
     Decoys close in both time and pitch to one already placed are redrawn."""
     rng = np.random.default_rng(seed)
     n = int(round(per_hour * duration_s / 3600.0))
-    kinds = list(CATALOG)
+    kinds = list(AIRCRAFT_TYPES)
     out = []
     tries = 0
     while len(out) < n and tries < 50 * max(n, 1):
@@ -102,12 +104,12 @@ def sample_decoys(duration_s, per_hour=60.0, f_band=(55.0, 330.0), d_range=(500.
             hd = [0.0] + [float(rng.uniform(*REALISM["harm_db"]) - 3 * j) for j in range(rng.integers(0, 3))]
             kind, origin = "warped copy of a curve in this recording", "template"
         else:
-            kind = kinds[rng.integers(len(kinds))]; c = CATALOG[kind]
+            kind = kinds[rng.integers(len(kinds))]; c = AIRCRAFT_TYPES[kind]
             f0 = rng.uniform(*c["bpf"]) * (1 if rng.random() < 0.7 else rng.choice([2.0, 0.5, 1.5]))
             v = rng.uniform(*c["v"]) * rng.uniform(0.9, 1.1)
             d = np.exp(rng.uniform(np.log(d_range[0]), np.log(d_range[1])))
             hd = [0.0] + [float(rng.uniform(*REALISM["harm_db"]) + (h - c["harm_db"][0]) / 2) for h in c["harm_db"][:rng.integers(0, 3)]]
-            origin = "catalog"
+            origin = "aircraft-type"
         if not (f_band[0] <= f0 * C / (C + v) and f0 * C / (C - v) <= f_band[1]):
             continue
         if any(abs(o.t_cpa - t) < 45 and abs(np.log(o.f0 / f0)) < 0.08 for o in out):
@@ -118,8 +120,13 @@ def sample_decoys(duration_s, per_hour=60.0, f_band=(55.0, 330.0), d_range=(500.
     return out
 
 
-def render(decoys, n_samples, sr, floor: NoiseFloor, max_span_s=480.0, ceiling_below_db=3.0):
-    """Sum of all decoys as a float32 signal at `sr`, `n_samples` long.
+def track_len(n_samples, sr):
+    """Length at SYN_SR of a decoy track for a recording of n_samples at sr (one spare second)."""
+    return int(np.ceil(n_samples * SYN_SR / sr)) + SYN_SR
+
+
+def render(decoys, n_samples, sr, floor: NoiseFloor, max_span_s=480.0):
+    """Sum of all decoys as a float32 track at SYN_SR for a recording of `n_samples` at `sr`.
 
     What makes a decoy look like a real flyover rather than a drawn line:
     - it fades in from the noise as the plane approaches and trails off as it leaves, at a rate
@@ -131,9 +138,8 @@ def render(decoys, n_samples, sr, floor: NoiseFloor, max_span_s=480.0, ceiling_b
     - turbulence makes it flicker (amplitude scintillation that grows with range) and smears
       the line slightly (fast pitch jitter, 0.04%) on top of the engine's slow rpm wander (0.15%).
     Each harmonic is then capped `below_db` under the masked threshold at its own frequency and
-    moment, and a final limiter keeps every auditory band `ceiling_below_db` under the threshold
-    where decoys overlap."""
-    n_syn = int(np.ceil(n_samples * SYN_SR / sr)) + SYN_SR
+    moment. The caller limits the sum (audibility.limit) where decoys overlap."""
+    n_syn = track_len(n_samples, sr)
     y = np.zeros(n_syn, np.float32)
     ctl = 10.0                                     # control rate for curves and envelopes, Hz
     for dc in decoys:
@@ -178,22 +184,4 @@ def render(decoys, n_samples, sr, floor: NoiseFloor, max_span_s=480.0, ceiling_b
             nz = ss.sosfilt(sos, rng.standard_normal(len(ts) + SYN_SR))[SYN_SR:]
             nz /= nz.std() + 1e-20
             y[i0:i0 + len(ts)] += (np.interp(ts, tc, g) * nz).astype(np.float32)
-    y = limit(y, SYN_SR, floor, K_MASK_DB - ceiling_below_db)
-    out = to_rate(y, SYN_SR, sr)
-    return out[:n_samples] if len(out) >= n_samples else np.pad(out, (0, n_samples - len(out)))
-
-
-def limit(y, sr_y, floor: NoiseFloor, ceiling_db, passes=2):
-    """Turn the decoy track down wherever any auditory band would go above `ceiling_db` re the
-    background (overlapping decoys add up). Gain is computed per second, eased over ~3 s."""
-    from scipy.ndimage import minimum_filter1d, uniform_filter1d
-    from .audibility import band_ratio_db
-    for _ in range(passes):
-        t, r = band_ratio_db(y, sr_y, floor)        # (T,) worst band per second, dB
-        if r.max() <= ceiling_db:
-            break
-        g = np.minimum(1.0, 10 ** ((ceiling_db - 0.5 - r) / 20))
-        g = uniform_filter1d(minimum_filter1d(g, 5), 3)
-        ty = np.arange(len(y)) / sr_y
-        y = (y * np.interp(ty, t, g, left=1.0, right=1.0)).astype(np.float32)
     return y

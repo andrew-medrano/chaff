@@ -1,128 +1,207 @@
-"""Command line: chaff protect IN OUT [options]."""
+"""chaff: add decoy propeller flyovers to a recording so a Doppler-curve geolocation search cannot trust it.
+
+  chaff protect IN OUT [--catalog CATALOG.npz]
+  chaff catalog CATALOG.npz REC [EVENTS.json] [REC [EVENTS.json] ...]
+"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
+import warnings
 
-import numpy as np
-import soundfile as sf
-
-from . import __version__, protect
-
-
-def _ffmpeg_read(path):
-    """Decode anything ffmpeg understands to float32 at the file's own rate and channel count."""
-    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
-        raise RuntimeError(f"soundfile cannot read {path!r} and ffmpeg/ffprobe are not on PATH")
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
-         "stream=sample_rate,channels", "-of", "json", path],
-        capture_output=True, text=True, check=True)
-    streams = json.loads(probe.stdout).get("streams") or []
-    if not streams:
-        raise RuntimeError(f"no audio stream in {path!r}")
-    sr = int(streams[0]["sample_rate"]); ch = int(streams[0]["channels"])
-    dec = subprocess.run(
-        ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-map", "0:a:0", "-f", "f32le",
-         "-acodec", "pcm_f32le", "-ar", str(sr), "-ac", str(ch), "-"],
-        capture_output=True, check=True)
-    x = np.frombuffer(dec.stdout, dtype="<f4").reshape(-1, ch)
-    return x.copy(), sr
+from . import __version__
+from .pipeline import LEAD, QUIET, SYNTHETIC, ChaffWarning, Synthetic, Tier, build_catalog, protect_file
 
 
-def read_audio(path):
-    """(x, sr) with x float32 shaped (N, C)."""
-    if not os.path.isfile(path):
-        raise FileNotFoundError(path)
-    try:
-        x, sr = sf.read(path, dtype="float32", always_2d=True)
-    except Exception:            # format libsndfile does not know (mp3 on old builds, m4a, ...)
-        x, sr = _ffmpeg_read(path)
-    return x, sr
+def _err(msg):
+    print(f"chaff: error: {msg}", file=sys.stderr)
+    return 2
 
 
-def write_audio(path, y, sr):
-    ext = os.path.splitext(path)[1].lower()
-    if ext in (".wav", ".w64", ".rf64", ".aif", ".aiff", ".caf"):
-        subtype = "FLOAT"
-    elif ext == ".flac":
-        subtype = "PCM_24"
-    else:
-        subtype = None          # soundfile's default for the format (e.g. VORBIS for .ogg)
-    if subtype != "FLOAT":
-        peak = float(np.max(np.abs(y))) if y.size else 0.0
-        if peak > 1.0:
-            print(f"warning: peak {peak:.3f} > 1.0 will clip in {ext or 'output'}", file=sys.stderr)
-    sf.write(path, y, sr, subtype=subtype)
+def _log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
+def _banner(lines):
+    w = max(len(s) for s in lines)
+    print("\n" + "!" * (w + 4), file=sys.stderr)
+    for s in lines:
+        print(f"! {s.ljust(w)} !", file=sys.stderr)
+    print("!" * (w + 4) + "\n", file=sys.stderr)
+
+
+def _wrap(msg, width=88):
+    out, line = [], ""
+    for word in msg.split():
+        if line and len(line) + 1 + len(word) > width:
+            out.append(line); line = word
+        else:
+            line = f"{line} {word}" if line else word
+    return out + [line]
+
+
+def _aud_line(name, a):
+    if a is None:
+        return f"  {name:<9} no decoys"
+    m = a["margin_db"]
+    state = f"{m:.1f} dB under the threshold" if m >= 0 else f"{-m:.1f} dB over the threshold (audible)"
+    return (f"  {name:<9} loudest band {a['worst_band_db']:+.1f} dB re background at {a['worst_band_hz']:.0f} Hz, "
+            f"{state}; {100 * a['share_band_seconds_over']:.1f}% of band-seconds over")
+
+
+def _tier(a, name, base: Tier):
+    g = lambda k: getattr(a, f"{name}_{k}")
+    return Tier(per_hour=base.per_hour if g("per_hour") is None else g("per_hour"),
+                snr_db=base.snr_db if g("snr") is None else tuple(g("snr")),
+                headroom_db=base.headroom_db if g("headroom") is None else g("headroom"),
+                limit_db=base.limit_db if g("limit") is None else g("limit"))
 
 
 def cmd_protect(a):
-    x, sr = read_audio(a.input)
-    y, decoys, rep = protect(x[:, 0] if x.shape[1] == 1 else x, sr, per_hour=a.per_hour,
-                             seed=a.seed, below_db=tuple(a.below),
-                             ceiling_below_db=a.ceiling_below, catalog=a.catalog,
-                             lead_per_hour=a.lead_per_hour, quiet_per_hour=a.quiet_per_hour)
-    write_audio(a.output, y, sr)
-    if a.decoys_json:
-        with open(a.decoys_json, "w") as fh:
-            json.dump({"decoys": [d.to_dict() for d in decoys], "audibility": rep}, fh, indent=1)
-    print(f"{a.input} -> {a.output}: {len(x) / sr / 60:.1f} min, {sr} Hz, {x.shape[1]} ch")
-    print(f"decoys added: {len(decoys)}")
-    print(f"worst band: {rep['worst_band_db']:.1f} dB at {rep['worst_band_hz']:.0f} Hz "
-          f"(audible near {rep['threshold_db']:.1f} dB)")
-    print(f"margin: {rep['margin_db']:.1f} dB under threshold" if rep['margin_db'] >= 0 else
-          f"loudest band {-rep['margin_db']:.1f} dB over threshold (lead decoys are as audible as faint real planes)")
+    synth_given = a.synth_per_hour is not None or a.synth_below is not None
+    tier_given = any(getattr(a, f"{t}_{k}") is not None for t in ("lead", "quiet") for k in ("per_hour", "snr", "headroom", "limit"))
+    if a.catalog and a.synthetic:
+        return _err("--catalog and --synthetic exclude each other")
+    if a.catalog and synth_given:
+        return _err("--synth-* options only apply to synthetic decoys, not with --catalog")
+    if a.synthetic and tier_given:
+        return _err("--lead-* / --quiet-* options only apply to stack decoys, not with --synthetic")
+    so = Synthetic(per_hour=SYNTHETIC.per_hour if a.synth_per_hour is None else a.synth_per_hour,
+                   below_db=SYNTHETIC.below_db if a.synth_below is None else tuple(a.synth_below),
+                   limit_db=SYNTHETIC.limit_db)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ChaffWarning)       # printed as they happen and again at the end
+        try:
+            decoys, rep = protect_file(a.input, a.output, a.catalog, seed=a.seed, lead=_tier(a, "lead", LEAD),
+                                       quiet=_tier(a, "quiet", QUIET), synthetic=a.synthetic, synth_opts=so,
+                                       subtype=a.subtype, workers=a.workers, log=None if a.silent else _log)
+        except (ValueError, FileNotFoundError, RuntimeError, ImportError) as e:
+            return _err(e)
+    if a.report:
+        with open(a.report, "w") as fh:
+            json.dump({"decoys": [d.to_dict() for d in decoys], "report": rep}, fh, indent=1)
+    out = rep["output"]
+    print(f"{a.input} -> {out['path']}: {rep['duration_s'] / 60:.1f} min, {rep['sr']} Hz, {rep['channels']} ch, "
+          f"{out['format']} {out['subtype']}")
+    print(f"decoys: {rep['mode']}, source: {rep['catalog']['source']}")
+    for name, t in rep["tiers"].items():
+        print(f"  {name:<9} {t['n']} decoys ({t['per_hour']:g} per hour)")
+    print(f"audibility (a tone becomes audible near {rep['audibility']['threshold_db']:.0f} dB re background):")
+    for name in ("quiet", "lead", "synthetic", "combined"):
+        if name in rep["audibility"]:
+            print(_aud_line(name, rep["audibility"][name]))
+    if rep["warnings"]:
+        _banner(sum((_wrap("WARNING: " + w) for w in rep["warnings"]), []))
     return 0
 
 
-def cmd_catalog(a):
-    """Build a stack catalog from recordings and their flyover events (e.g. `dopplertrack detect --out`)."""
-    from . import noise, stack
-    if len(a.pairs) % 2:
-        raise SystemExit("give REC EVENTS.json pairs")
+def _pairs(items):
+    """REC [EVENTS.json] REC ... -> [(rec, events path or None)]"""
     out = []
-    for rec, evp in zip(a.pairs[::2], a.pairs[1::2]):
-        x, sr = read_audio(rec); xm = x.mean(1); fl = noise.noise_floor(xm, sr)
-        evs = json.load(open(evp))[:a.top]
-        for i, e in enumerate(evs):
-            k = stack.extract(xm, sr, e, fl, name=f"{os.path.basename(rec)}#{i + 1}")
-            out.append(k); print(f"{k.name}: {len(k.lines_hz)} line bins, sweep {k.sweep_snr_db:.1f} dB")
-    stack.save(out, a.output)
-    usable = sum(len(k.lines_hz) >= 3 for k in out)
-    print(f"wrote {a.output}: {len(out)} flyovers, {usable} with an engine-line stack usable as decoys")
+    for it in items:
+        if it.lower().endswith(".json"):
+            if not out or out[-1][1] is not None:
+                raise ValueError(f"{it}: an events file must follow the recording it belongs to")
+            out[-1] = (out[-1][0], it)
+        else:
+            out.append((it, None))
+    return out
+
+
+def _events(path):
+    with open(path) as fh:
+        ev = json.load(fh)
+    if isinstance(ev, dict):
+        ev = ev.get("events", [])
+    if not isinstance(ev, list):
+        raise ValueError(f"{path}: expected a list of events (t_cpa, f0, v, d)")
+    return ev
+
+
+def cmd_catalog(a):
+    try:
+        pairs = [(rec, None if evp is None else _events(evp)) for rec, evp in _pairs(a.inputs)]
+        if not pairs:
+            raise ValueError("give at least one recording")
+        stacks, notes = build_catalog(pairs, top=a.top, workers=a.workers, log=_log)
+    except (ValueError, FileNotFoundError, RuntimeError, ImportError, OSError) as e:
+        return _err(e)
+    from .stack import save
+    usable = [k for k in stacks if k.usable]
+    if not usable:
+        return _err(f"no usable flyover: {len(stacks)} extracted, none with 3 or more engine lines; "
+                    "nothing written. Use recordings with louder propeller planes.")
+    path = save(stacks, a.output)
+    print(f"wrote {path}: {len(stacks)} flyovers, {len(usable)} usable as decoy sources "
+          f"(isolated SNR {min(k.iso_snr_db for k in usable):.1f}-{max(k.iso_snr_db for k in usable):.1f} dB; "
+          f"lead tier needs {LEAD.snr_db[0] + LEAD.headroom_db:.0f} dB, quiet {QUIET.snr_db[0] + QUIET.headroom_db:.0f} dB)")
     return 0
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="chaff", description=__doc__)
+    p = argparse.ArgumentParser(prog="chaff", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"chaff {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
-    pp = sub.add_parser("protect", help="add decoy flyovers to a recording")
-    pp.add_argument("input", metavar="IN")
-    pp.add_argument("output", metavar="OUT")
-    pp.add_argument("--per-hour", type=float, default=60.0, help="decoys per hour (default 60)")
+
+    pp = sub.add_parser("protect", help="add decoy flyovers to a recording",
+                        description="Add decoy flyovers to a recording. Without --catalog, decoys are made from "
+                                    "this recording's own flyovers (needs chaff[detect]); if it has none usable, "
+                                    "synthetic decoys are used and a warning is printed.")
+    pp.add_argument("input", metavar="IN", help="any file libsndfile or ffmpeg can read")
+    pp.add_argument("output", metavar="OUT", help=".wav (float), .flac, .ogg, .mp3, .aiff, .caf, .w64, .rf64")
+    pp.add_argument("--catalog", metavar="NPZ", help="stack catalog from `chaff catalog`")
+    pp.add_argument("--synthetic", action="store_true", help="use synthetic decoys (easier to tell apart)")
     pp.add_argument("--seed", type=int, default=0)
-    pp.add_argument("--below", nargs=2, type=float, metavar=("LO", "HI"), default=(4.0, 9.0),
-                    help="each decoy peaks this many dB under the audibility threshold (default 4 9)")
-    pp.add_argument("--ceiling-below", type=float, default=3.0, metavar="DB",
-                    help="limit all decoys together to this many dB under threshold (default 3)")
-    pp.add_argument("--decoys-json", metavar="PATH", help="write decoy list and audibility report")
-    pp.add_argument("--catalog", metavar="NPZ", help="stack catalog from `chaff catalog` (recommended)")
-    pp.add_argument("--lead-per-hour", type=float, default=6.0, help="with --catalog: decoys as loud as faint real planes (default 6)")
-    pp.add_argument("--quiet-per-hour", type=float, default=54.0, help="with --catalog: decoys under the hearing threshold (default 54)")
+    pp.add_argument("--report", metavar="JSON", help="write the decoy list and the audibility report")
+    pp.add_argument("--subtype", help="output sample format, e.g. PCM_16, PCM_24, FLOAT (default: FLOAT for "
+                                      "wav-like files, PCM_24 for flac)")
+    pp.add_argument("--workers", type=int, help="processes for flyover detection (default: all cores)")
+    pp.add_argument("--silent", action="store_true", help="no progress messages")
+    g = pp.add_argument_group("stack decoy tiers (defaults: the tested recipe)")
+    for name, t in (("lead", LEAD), ("quiet", QUIET)):
+        g.add_argument(f"--{name}-per-hour", type=float, metavar="N", help=f"{name} decoys per hour (default {t.per_hour:g})")
+        g.add_argument(f"--{name}-snr", type=float, nargs=2, metavar=("LO", "HI"),
+                       help=f"per-bin SNR range of the fundamental through the sweep, dB (default {t.snr_db[0]:g} {t.snr_db[1]:g})")
+        g.add_argument(f"--{name}-headroom", type=float, metavar="DB",
+                       help=f"source stack must be this much louder than the target (default {t.headroom_db:g})")
+        g.add_argument(f"--{name}-limit", type=float, metavar="DB",
+                       help=f"limiter ceiling per auditory band re background, dB (default {t.limit_db:g})")
+    g = pp.add_argument_group("synthetic decoys (with --synthetic, or as the fallback)")
+    g.add_argument("--synth-per-hour", type=float, metavar="N", help=f"default {SYNTHETIC.per_hour:g}")
+    g.add_argument("--synth-below", type=float, nargs=2, metavar=("LO", "HI"),
+                   help=f"each peaks this many dB under the hearing threshold (default {SYNTHETIC.below_db[0]:g} {SYNTHETIC.below_db[1]:g})")
     pp.set_defaults(func=cmd_protect)
-    pc = sub.add_parser("catalog", help="build a decoy catalog from real flyovers in recordings")
+
+    pc = sub.add_parser("catalog", help="build a decoy catalog from real flyovers in recordings",
+                        description="Build a stack catalog. Each recording may be followed by an events JSON "
+                                    "(a list of t_cpa, f0, v, d, e.g. from `dopplertrack detect --out`); without "
+                                    "one its flyovers are found with dopplertrack's detector.")
     pc.add_argument("output", metavar="OUT.npz")
-    pc.add_argument("pairs", nargs="+", metavar="REC EVENTS", help="recording and its events JSON (list of t_cpa, f0, v, d)")
-    pc.add_argument("--top", type=int, default=10, help="use the first N events of each file (default 10)")
+    pc.add_argument("inputs", nargs="+", metavar="REC [EVENTS.json]")
+    pc.add_argument("--top", type=int, default=10, help="use the first N events of each recording (default 10)")
+    pc.add_argument("--workers", type=int, help="processes for flyover detection (default: all cores)")
     pc.set_defaults(func=cmd_catalog)
     a = p.parse_args(argv)
     return a.func(a)
 
 
-if __name__ == "__main__":
+def entry():
+    """Console entry point (`chaff`, `python -m chaff`).
+
+    On macOS the system allocator keeps up to ~1.5 GB of freed large blocks cached for reuse, and
+    a decoy run frees many of them, so the process looks (and is) far bigger than what it holds.
+    MallocLargeCache=0 turns that cache off; it must be set before the process starts, so the
+    command re-executes itself once with it."""
+    if sys.platform == "darwin" and "MallocLargeCache" not in os.environ:
+        env = dict(os.environ, MallocLargeCache="0")
+        try:
+            os.execve(sys.executable, [sys.executable, "-m", "chaff", *sys.argv[1:]], env)
+        except OSError:
+            pass                 # carry on with the cache
     sys.exit(main())
+
+
+if __name__ == "__main__":
+    entry()

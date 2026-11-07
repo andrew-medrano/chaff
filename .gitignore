@@ -5,7 +5,7 @@ __pycache__/
 build/
 dist/
 .venv/
-# never commit audio, catalogs or flight data
+# never commit audio, catalogs or flight data (except the bundled catalog below)
 *.wav
 *.mp3
 *.flac
@@ -16,3 +16,4 @@ dist/
 *.parquet
 *.log
 .DS_Store
+!/src/chaff/data/mcmaster.npz

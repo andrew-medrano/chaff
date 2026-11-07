@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chaff"
-version = "0.2.0"
+version = "0.3.0"
 description = "Add realistic decoy propeller flyovers to a recording so that locating it by matching aircraft Doppler curves to flight tracks cannot trust what it finds."
 readme = "README.md"
 license = "MIT"
@@ -35,6 +35,9 @@ chaff = "chaff.cli:entry"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+chaff = ["data/mcmaster.npz", "data/README.md"]   # the bundled catalog and its credit
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

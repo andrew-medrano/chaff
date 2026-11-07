@@ -1,6 +1,6 @@
 """chaff: add decoy propeller flyovers to a recording so a Doppler-curve geolocation search cannot trust it.
 
-  chaff protect IN OUT [--catalog CATALOG.npz]
+  chaff protect IN OUT [--catalog CATALOG.npz | --find-flyovers | --synthetic] [-j JOBS]
   chaff catalog CATALOG.npz REC [EVENTS.json] [REC [EVENTS.json] ...]
 """
 from __future__ import annotations
@@ -13,6 +13,7 @@ import warnings
 
 from . import __version__
 from .pipeline import LEAD, QUIET, SYNTHETIC, ChaffWarning, Synthetic, Tier, build_catalog, protect_file
+from .render import default_jobs
 
 
 def _err(msg):
@@ -62,10 +63,14 @@ def _tier(a, name, base: Tier):
 def cmd_protect(a):
     synth_given = a.synth_per_hour is not None or a.synth_below is not None
     tier_given = any(getattr(a, f"{t}_{k}") is not None for t in ("lead", "quiet") for k in ("per_hour", "snr", "headroom", "limit"))
-    if a.catalog and a.synthetic:
-        return _err("--catalog and --synthetic exclude each other")
-    if a.catalog and synth_given:
-        return _err("--synth-* options only apply to synthetic decoys, not with --catalog")
+    picked = [f for f, on in (("--catalog", a.catalog), ("--find-flyovers", a.find_flyovers),
+                              ("--synthetic", a.synthetic)) if on]
+    if len(picked) > 1:
+        return _err(f"{' and '.join(picked)} exclude each other")
+    if synth_given and not a.synthetic:
+        return _err("--synth-* options only apply to synthetic decoys (--synthetic)")
+    if a.jobs is not None and a.jobs < 1:
+        return _err("--jobs must be 1 or more")
     if a.synthetic and tier_given:
         return _err("--lead-* / --quiet-* options only apply to stack decoys, not with --synthetic")
     so = Synthetic(per_hour=SYNTHETIC.per_hour if a.synth_per_hour is None else a.synth_per_hour,
@@ -74,9 +79,10 @@ def cmd_protect(a):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ChaffWarning)       # printed as they happen and again at the end
         try:
-            decoys, rep = protect_file(a.input, a.output, a.catalog, seed=a.seed, lead=_tier(a, "lead", LEAD),
-                                       quiet=_tier(a, "quiet", QUIET), synthetic=a.synthetic, synth_opts=so,
-                                       subtype=a.subtype, workers=a.workers, log=None if a.silent else _log)
+            decoys, rep = protect_file(a.input, a.output, a.catalog, find_flyovers=a.find_flyovers,
+                                       synthetic=a.synthetic, seed=a.seed, lead=_tier(a, "lead", LEAD),
+                                       quiet=_tier(a, "quiet", QUIET), synth_opts=so, subtype=a.subtype,
+                                       jobs=a.jobs, workers=a.workers, log=None if a.silent else _log)
         except (ValueError, OSError, RuntimeError, ImportError) as e:
             return _err(e)
     if a.report:
@@ -85,7 +91,8 @@ def cmd_protect(a):
     out = rep["output"]
     print(f"{a.input} -> {out['path']}: {rep['duration_s'] / 60:.1f} min, {rep['sr']} Hz, {rep['channels']} ch, "
           f"{out['format']} {out['subtype']}")
-    print(f"decoys: {rep['mode']}, source: {rep['catalog']['source']}")
+    print(f"decoys: {rep['mode']}, source: {rep['catalog']['source']}; rendered in "
+          f"{rep['render_processes']} process{'es' if rep['render_processes'] > 1 else ''}")
     for name, t in rep["tiers"].items():
         print(f"  {name:<9} {t['n']} decoys ({t['per_hour']:g} per hour)")
     print(f"audibility (a tone becomes audible near {rep['audibility']['threshold_db']:.0f} dB re background):")
@@ -146,18 +153,26 @@ def main(argv=None):
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pp = sub.add_parser("protect", help="add decoy flyovers to a recording",
-                        description="Add decoy flyovers to a recording. Without --catalog, decoys are made from "
-                                    "this recording's own flyovers (needs chaff[detect]); if it has none usable, "
-                                    "synthetic decoys are used and a warning is printed.")
+                        description="Add decoy flyovers to a recording. By default the decoys are made from the "
+                                    "catalog that ships with chaff: real flyovers from the Hamilton Naturalists' "
+                                    "Club's McMaster Forest recordings (via the Internet Archive).")
     pp.add_argument("input", metavar="IN", help="any file libsndfile or ffmpeg can read")
     pp.add_argument("output", metavar="OUT", help=".wav (float), .flac, .ogg, .mp3, .aiff, .caf, .w64, .rf64")
-    pp.add_argument("--catalog", metavar="NPZ", help="stack catalog from `chaff catalog`")
-    pp.add_argument("--synthetic", action="store_true", help="use synthetic decoys (easier to tell apart)")
+    src = pp.add_argument_group("decoy source (default: the bundled McMaster Forest catalog)")
+    src.add_argument("--catalog", metavar="NPZ", help="another stack catalog, e.g. from `chaff catalog`")
+    src.add_argument("--find-flyovers", action="store_true",
+                     help="make the decoys from this recording's own flyovers, found with dopplertrack "
+                          "(needs chaff[detect]); falls back to the bundled catalog if none is usable")
+    src.add_argument("--synthetic", action="store_true", help="use synthetic decoys (easier to tell apart)")
+    pp.add_argument("-j", "--jobs", type=int, metavar="N",
+                    help=f"processes that render the decoys (default: all cores but one, here {default_jobs()}; "
+                         "1 = one process); the output does not depend on it")
     pp.add_argument("--seed", type=int, default=0)
     pp.add_argument("--report", metavar="JSON", help="write the decoy list and the audibility report")
     pp.add_argument("--subtype", help="output sample format, e.g. PCM_16, PCM_24, FLOAT (default: FLOAT for "
                                       "wav-like files, PCM_24 for flac)")
-    pp.add_argument("--workers", type=int, help="processes for flyover detection (default: all cores)")
+    pp.add_argument("--workers", type=int, help="processes for flyover detection with --find-flyovers "
+                                                 "(default: all cores)")
     pp.add_argument("--silent", action="store_true", help="no progress messages")
     g = pp.add_argument_group("stack decoy tiers (defaults: the tested recipe)")
     for name, t in (("lead", LEAD), ("quiet", QUIET)):
@@ -168,7 +183,7 @@ def main(argv=None):
                        help=f"source stack must be this much louder than the target (default {t.headroom_db:g})")
         g.add_argument(f"--{name}-limit", type=float, metavar="DB",
                        help=f"limiter ceiling per auditory band re background, dB (default {t.limit_db:g})")
-    g = pp.add_argument_group("synthetic decoys (with --synthetic, or as the fallback)")
+    g = pp.add_argument_group("synthetic decoys (with --synthetic)")
     g.add_argument("--synth-per-hour", type=float, metavar="N", help=f"default {SYNTHETIC.per_hour:g}")
     g.add_argument("--synth-below", type=float, nargs=2, metavar=("LO", "HI"),
                    help=f"each peaks this many dB under the hearing threshold (default {SYNTHETIC.below_db[0]:g} {SYNTHETIC.below_db[1]:g})")
@@ -194,11 +209,13 @@ def entry():
     a decoy run frees many of them, so the process looks (and is) far bigger than what it holds.
     MallocLargeCache=0 turns that cache off; it must be set before the process starts, so the
     command re-executes itself once with it. Detection worker processes get the default back:
-    they hold little, and without the cache they spend much of their time in page faults."""
+    they hold little, and without the cache they spend much of their time in page faults. Decoy
+    render workers free large blocks like the main process, so they run without it too."""
     if os.environ.pop("_CHAFF_REEXEC", None):
-        os.environ.pop("MallocLargeCache", None)      # this process is set; its workers are not
+        os.environ.pop("MallocLargeCache", None)      # this process is set; detection workers are not
     elif sys.platform == "darwin" and "MallocLargeCache" not in os.environ:
-        env = dict(os.environ, MallocLargeCache="0", _CHAFF_REEXEC="1")
+        # _CHAFF_MALLOC_LARGE_CACHE: render workers get this process's setting (render._worker_env)
+        env = dict(os.environ, MallocLargeCache="0", _CHAFF_REEXEC="1", _CHAFF_MALLOC_LARGE_CACHE="0")
         try:
             os.execve(sys.executable, [sys.executable, "-m", "chaff", *sys.argv[1:]], env)
         except OSError:

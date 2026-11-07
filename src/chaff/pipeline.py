@@ -1,11 +1,13 @@
 """The whole protection run: background, decoy sources, decoys in two tiers, output.
 
-1. One streaming pass over the recording measures its background (and, without a catalog,
+1. One streaming pass over the recording measures its background (and, with find_flyovers,
    finds its flyovers with dopplertrack's detector).
-2. Decoy sources: the catalog's stacks, or stacks lifted from the recording's own flyovers
-   (reading only the minutes around each one). Without usable stacks, synthetic decoys.
-3. Decoys are rendered at 2 kHz. The quiet tier is rendered and limited on its own, so it stays
-   under the hearing threshold; the lead tier gets its own limiter; then the two are added.
+2. Decoy sources: the bundled catalog's stacks (the default), another catalog's, or stacks
+   lifted from the recording's own flyovers (reading only the minutes around each one). Or
+   synthetic decoys, when asked for.
+3. Decoys are rendered at 2 kHz, on several cores (render.py). The quiet tier is rendered and
+   limited on its own, so it stays under the hearing threshold; the lead tier gets its own
+   limiter; then the two are added.
 4. A second streaming pass writes the recording plus the decoy track, upsampled block by block.
 
 Peak memory is the 2 kHz decoy tracks (0.35 GB each for 12 hours) plus a few blocks, whatever
@@ -20,7 +22,7 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
-from . import audibility, detect, stack, synth
+from . import audibility, detect, render, stack, synth
 from .audio import BLOCK, ArraySource, Writer, open_source, output_format
 from .noise import A_SR, K_MASK_DB, FloorBuilder
 from .resample import Pull, Resampler
@@ -155,9 +157,21 @@ def extract_stacks(source, n, floor, events, top=None, log=None, notes=None):
 
 
 def _load_catalog(catalog):
+    """(stacks, path or None, description)"""
     if isinstance(catalog, (str, bytes)) or hasattr(catalog, "__fspath__"):
-        return stack.load(catalog), os.fspath(catalog)
-    return list(catalog), "given"
+        path = os.fsdecode(catalog)
+        return stack.load(path), path, path
+    return list(catalog), None, "given"
+
+
+def _bundled():
+    """(stacks, path, report entry) of the catalog that ships with chaff."""
+    path = stack.bundled_path()
+    info = stack.load_info(path)
+    stacks = stack.load(path)
+    return stacks, path, dict(source=f"bundled: {info.get('name', 'catalog')} ({info.get('credit', '')})",
+                              path=path, stacks=len(stacks), usable=sum(k.usable for k in stacks),
+                              credit=info.get("credit"), source_url=info.get("source_url"))
 
 
 def _describe(stacks):
@@ -174,33 +188,39 @@ def _tier_info(t: Tier, n):
     return dict(asdict(t), n=n)
 
 
-def _run(source, write, catalog, seed, lead, quiet, synthetic, synth_opts, workers, max_events, log):
+def _run(source, write, catalog, find_flyovers, synthetic, seed, lead, quiet, synth_opts, jobs, workers,
+         max_events, log):
+    if render.starting_worker():
+        raise RuntimeError("chaff was called while a worker process was starting: a script that uses chaff "
+                           "needs an `if __name__ == \"__main__\":` guard on macOS and Windows")
+    if sum([catalog is not None, bool(find_flyovers), bool(synthetic)]) > 1:
+        raise ValueError("choose one decoy source: a catalog, find_flyovers or synthetic")
+    jobs = render.check_jobs(jobs)
     run = _Run(log)
     if source.sr < SYN_SR:
         raise ValueError(f"sample rate {source.sr} Hz is too low (decoys need at least {SYN_SR} Hz)")
     if source.frames is not None and source.frames / source.sr < MIN_DURATION_S:
         raise ValueError(f"recording is {source.frames / source.sr:.1f} s long; chaff needs at least {MIN_DURATION_S:.0f} s")
     rep = dict(mode=None, catalog=None, sr=source.sr, channels=source.channels)
-    stacks, find = None, False
+    stacks, cat_path, find = None, None, False
     if synthetic:
         rep["catalog"] = dict(source="none (synthetic decoys requested)")
+    elif find_flyovers:
+        detect._api()                                  # ImportError with the install hint
+        find = True
     elif catalog is not None:
-        stacks, where = _load_catalog(catalog)
+        stacks, cat_path, where = _load_catalog(catalog)
         if not any(k.usable for k in stacks):
             raise ValueError(f"catalog {where} is unusable: {_describe(stacks)}")
         rep["catalog"] = dict(source=where, stacks=len(stacks), usable=sum(k.usable for k in stacks))
-    elif detect.available():
-        find = True
     else:
-        run.warn("no catalog given and dopplertrack is not installed, so chaff cannot use real flyovers: "
-                 "falling back to synthetic decoys, which are easier to tell from real planes. "
-                 "Install chaff[detect] or pass a catalog.")
-        rep["catalog"] = dict(source="none (dopplertrack not installed)")
+        stacks, cat_path, rep["catalog"] = _bundled()
 
     run.log(f"pass 1/2: measuring the background{' and finding flyovers' if find else ''}")
     n, floor, events = analyse(source, find_flyovers=find, max_events=max_events, workers=workers, log=run.log)
     dur = n / source.sr
     rep["duration_s"] = dur
+    fallback = ": using the bundled catalog instead"
     if find:
         run.log(f"lifting {len(events)} detected flyovers out of the recording")
         notes = []
@@ -212,27 +232,31 @@ def _run(source, write, catalog, seed, lead, quiet, synthetic, synth_opts, worke
                                     for k in stacks if k.usable])
         if not any(k.usable for k in stacks):
             run.warn(f"no flyover in this recording has a clear engine-line stack ({len(events)} detected; "
-                     f"{_describe(stacks)}): falling back to synthetic decoys, which are easier to tell from "
-                     "real planes. Build a catalog from recordings with loud propeller planes for better decoys.")
-            stacks = None
+                     f"{_describe(stacks)})" + fallback)
+            stacks, cat_path, rep["catalog"] = _bundled()
+            rep["catalog"]["self"] = dict(detected=len(events), notes=notes, events=events)
 
+    rep["mode"] = "stack" if stacks is not None else "synthetic"
     if stacks is not None:
         el = {name: stack.eligible(stacks, t.snr_db, t.headroom_db) for name, t in (("lead", lead), ("quiet", quiet))}
         if not el["lead"] and not el["quiet"]:
             msg = (f"no stack is loud enough for either tier ({_describe(stacks)}; lead needs "
                    f"{lead.snr_db[0] + lead.headroom_db:.0f} dB, quiet {quiet.snr_db[0] + quiet.headroom_db:.0f} dB)")
-            if not find:
+            if not (find and cat_path is None):
                 raise ValueError(f"catalog is unusable: {msg}")
-            run.warn(msg + ": falling back to synthetic decoys, which are easier to tell from real planes")
-            stacks = None
-        else:
-            for name, t in (("lead", lead), ("quiet", quiet)):
-                if not el[name] and t.per_hour > 0:
-                    run.warn(f"{name} tier skipped: no stack reaches {t.snr_db[0] + t.headroom_db:.0f} dB isolated SNR "
-                             f"({_describe(stacks)})")
+            run.warn(msg + fallback)
+            self_rep = rep["catalog"]
+            stacks, cat_path, rep["catalog"] = _bundled()
+            rep["catalog"]["self"] = self_rep
+            el = {name: stack.eligible(stacks, t.snr_db, t.headroom_db) for name, t in (("lead", lead), ("quiet", quiet))}
+            if not el["lead"] and not el["quiet"]:
+                raise ValueError(f"the bundled catalog is unusable with these tier settings ({_describe(stacks)})")
+        for name, t in (("lead", lead), ("quiet", quiet)):
+            if not el[name] and t.per_hour > 0:
+                run.warn(f"{name} tier skipped: no stack reaches {t.snr_db[0] + t.headroom_db:.0f} dB isolated SNR "
+                         f"({_describe(stacks)})")
 
     if stacks is not None:
-        rep["mode"] = "stack"
         edge = min(EDGE_S, 0.25 * dur)
         dl = stack.sample(stacks, dur, lead.per_hour, lead.snr_db, lead.headroom_db, seed=seed, edge_s=edge,
                           tier="lead") if el["lead"] else []
@@ -241,35 +265,39 @@ def _run(source, write, catalog, seed, lead, quiet, synthetic, synth_opts, worke
         if not dl and not dq:
             raise ValueError(f"no decoys placed: at {lead.per_hour:g} + {quiet.per_hour:g} per hour a "
                              f"{dur / 60:.1f} min recording gets none")
-        # quiet tier on its own, limited under the hearing threshold, then parked on disk
-        run.log(f"rendering {len(dq)} quiet decoys")
-        tq, sk_q = stack.render(dq, stacks, n, source.sr, floor, progress=_every(run.log, len(dq)))
-        audibility.limit(tq, SYN_SR, floor, quiet.limit_db)
-        dq = [d for d in dq if d not in sk_q]
-        aud_q = audibility.report(tq, SYN_SR, floor) if dq else None
-        spill = _Spill(tq)
-        del tq
-        try:
-            run.log(f"rendering {len(dl)} lead decoys")
-            track, sk_l = stack.render(dl, stacks, n, source.sr, floor, progress=_every(run.log, len(dl)))
-            audibility.limit(track, SYN_SR, floor, lead.limit_db)
-            dl = [d for d in dl if d not in sk_l]
-            if sk_q or sk_l:
-                run.log(f"  {len(sk_q) + len(sk_l)} decoys did not fit in the recording and were left out")
-            decoys = sorted(dl + dq, key=lambda d: d.t_cpa)
-            if not decoys:
-                raise ValueError("no decoy fitted in the recording")
-            run.log("measuring audibility")
-            aud = dict(threshold_db=K_MASK_DB, quiet=aud_q,
-                       lead=audibility.report(track, SYN_SR, floor) if dl else None,
-                       combined=audibility.report((track, spill), SYN_SR, floor))
-            for i in range(0, len(track), BLOCK * 4):          # lead + quiet, in place
-                track[i:i + BLOCK * 4] += spill[i:i + BLOCK * 4]
-        finally:
-            spill.close()
+        with render.Renderer(stacks, floor, jobs, catalog=cat_path, log=run.log) as rr:
+            # quiet tier on its own, limited under the hearing threshold, then parked on disk
+            run.log(f"rendering {len(dq)} quiet decoys")
+            tq, sk_q = rr.render(dq, n, source.sr, progress=_every(run.log, len(dq)))
+            used = rr.used
+            audibility.limit(tq, SYN_SR, floor, quiet.limit_db)
+            dq = [d for d in dq if d not in sk_q]
+            aud_q = audibility.report(tq, SYN_SR, floor) if dq else None
+            spill = _Spill(tq)
+            del tq
+            try:
+                run.log(f"rendering {len(dl)} lead decoys")
+                track, sk_l = rr.render(dl, n, source.sr, progress=_every(run.log, len(dl)))
+                used = max(used, rr.used)
+                rr.close()
+                audibility.limit(track, SYN_SR, floor, lead.limit_db)
+                dl = [d for d in dl if d not in sk_l]
+                if sk_q or sk_l:
+                    run.log(f"  {len(sk_q) + len(sk_l)} decoys did not fit in the recording and were left out")
+                decoys = sorted(dl + dq, key=lambda d: d.t_cpa)
+                if not decoys:
+                    raise ValueError("no decoy fitted in the recording")
+                run.log("measuring audibility")
+                aud = dict(threshold_db=K_MASK_DB, quiet=aud_q,
+                           lead=audibility.report(track, SYN_SR, floor) if dl else None,
+                           combined=audibility.report((track, spill), SYN_SR, floor))
+                for i in range(0, len(track), BLOCK * 4):          # lead + quiet, in place
+                    track[i:i + BLOCK * 4] += spill[i:i + BLOCK * 4]
+            finally:
+                spill.close()
         rep["tiers"] = dict(lead=_tier_info(lead, len(dl)), quiet=_tier_info(quiet, len(dq)))
+        rep["render_processes"] = used
     else:
-        rep["mode"] = "synthetic"
         decoys = synth.sample_decoys(dur, per_hour=synth_opts.per_hour, below_db=tuple(synth_opts.below_db),
                                      seed=seed, edge_s=min(SYNTH_EDGE_S, 0.25 * dur))
         if not decoys:
@@ -281,6 +309,7 @@ def _run(source, write, catalog, seed, lead, quiet, synthetic, synth_opts, worke
         a = audibility.report(track, SYN_SR, floor)
         aud = dict(threshold_db=K_MASK_DB, synthetic=a, combined=a)
         rep["tiers"] = dict(synthetic=dict(asdict(synth_opts), n=len(decoys)))
+        rep["render_processes"] = 1
     rep["n_decoys"] = len(decoys)
     rep["audibility"] = aud
     rep["warnings"] = run.warnings
@@ -295,20 +324,26 @@ def _every(log, n, step=50):
     return lambda j, tot: log(f"  {j}/{tot}") if j % step == 0 or j == tot else None
 
 
-def protect(x, sr, catalog=None, *, seed=0, lead=LEAD, quiet=QUIET, synthetic=False, synth_opts=SYNTHETIC,
-            workers=None, max_events=20, log=None):
+def protect(x, sr, catalog=None, *, find_flyovers=False, synthetic=False, seed=0, lead=LEAD, quiet=QUIET,
+            synth_opts=SYNTHETIC, jobs=None, workers=None, max_events=20, log=None):
     """Add decoy flyovers to an in-memory recording.
 
     x: mono (N,) or multichannel (N, C) audio. The background and decoys are computed on the
     channel mean and the same decoy track is added to every channel.
 
-    catalog: a stack catalog (path, or list of stack.Stack) from `chaff catalog`. If None, decoy
-    sources are lifted from this recording's own flyovers (needs dopplertrack); if it has none
-    with a clear engine-line stack, or dopplertrack is missing, synthetic decoys are used and a
-    ChaffWarning is raised. synthetic=True uses synthetic decoys outright.
+    Decoy sources (choose at most one):
+    - catalog=None (the default): the catalog bundled with chaff (bundled_catalog()), engine-line
+      stacks of real flyovers from the Hamilton Naturalists' Club's McMaster Forest recordings.
+    - catalog: another stack catalog, a path or a list of stack.Stack, e.g. from `chaff catalog`.
+    - find_flyovers=True: lift the sources out of this recording's own flyovers, found with
+      dopplertrack's detector (needs chaff[detect]). If none has a clear engine-line stack, the
+      bundled catalog is used instead and a ChaffWarning is raised.
+    - synthetic=True: synthetic decoys (easier to tell from real planes).
 
     lead, quiet: the two tiers (Tier); the defaults are the tested recipe. synth_opts: settings
-    for synthetic decoys. workers: processes for flyover detection (None = all cores).
+    for synthetic decoys. jobs: processes that render the decoys (None = all cores but one,
+    1 = this process only); the result does not depend on it. workers: processes for flyover
+    detection (None = all cores).
 
     Returns (y, decoys, report): protected audio with the shape of x (float32), the list of
     decoys (stack.StackDecoy, or synth.Decoy for synthetic decoys), and a report dict with
@@ -325,12 +360,13 @@ def protect(x, sr, catalog=None, *, seed=0, lead=LEAD, quiet=QUIET, synthetic=Fa
             y[i:i + m] += p.read(m)[:, None]
         out["y"] = y if np.ndim(x) == 2 else y[:, 0]
 
-    decoys, rep = _run(src, write, catalog, seed, lead, quiet, synthetic, synth_opts, workers, max_events, log)
+    decoys, rep = _run(src, write, catalog, find_flyovers, synthetic, seed, lead, quiet, synth_opts, jobs, workers,
+                       max_events, log)
     return out["y"], decoys, rep
 
 
-def protect_file(input, output, catalog=None, *, seed=0, lead=LEAD, quiet=QUIET, synthetic=False,
-                 synth_opts=SYNTHETIC, subtype=None, workers=None, max_events=20, log=None):
+def protect_file(input, output, catalog=None, *, find_flyovers=False, synthetic=False, seed=0, lead=LEAD,
+                 quiet=QUIET, synth_opts=SYNTHETIC, subtype=None, jobs=None, workers=None, max_events=20, log=None):
     """protect() for files, streamed: the recording is read in blocks twice and never held in
     memory. Returns (decoys, report); report["output"] says how it was written."""
     if os.path.abspath(input) == os.path.abspath(output):
@@ -351,7 +387,8 @@ def protect_file(input, output, catalog=None, *, seed=0, lead=LEAD, quiet=QUIET,
         if w.rf64:
             rep_out["note"] = "written as RF64 (a .wav this large does not fit the WAV header)"
 
-    decoys, rep = _run(src, write, catalog, seed, lead, quiet, synthetic, synth_opts, workers, max_events, log)
+    decoys, rep = _run(src, write, catalog, find_flyovers, synthetic, seed, lead, quiet, synth_opts, jobs, workers,
+                       max_events, log)
     rep["input"] = os.fspath(input)
     rep["output"] = rep_out
     if rep_out.get("clipped_samples"):

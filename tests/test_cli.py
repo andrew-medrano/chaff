@@ -88,6 +88,10 @@ def test_errors_exit_nonzero(tmp_path, capsys):
     assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--synthetic", "--lead-per-hour", "3"]) == 2
     assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--catalog", "c.npz", "--synth-per-hour", "3"]) == 2
     assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--catalog", "c.npz", "--synthetic"]) == 2
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--find-flyovers", "--synthetic"]) == 2
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--catalog", "c.npz", "--find-flyovers"]) == 2
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--synth-per-hour", "3"]) == 2
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "-j", "0"]) == 2
     short = tmp_path / "short.wav"
     sf.write(short, pink(sr * 30, sr), sr)
     assert cli.main(["protect", str(short), str(tmp_path / "o.wav"), "--synthetic"]) == 2
@@ -104,15 +108,37 @@ def test_errors_exit_nonzero(tmp_path, capsys):
     assert "error" in capsys.readouterr().err
 
 
-def test_fallback_warning_is_boxed(tmp_path, monkeypatch, capsys):
-    from chaff import detect
-    monkeypatch.setattr(detect, "available", lambda: False)
+def test_fallback_warning_is_boxed(tmp_path, stub_detector, capsys):
+    # --find-flyovers on a recording whose only "flyover" is noise: the bundled catalog, with a boxed warning
     sr = 8000
     src = tmp_path / "in.wav"
-    sf.write(src, pink(sr * 120, sr), sr)
-    assert cli.main(["protect", str(src), str(tmp_path / "o.wav")]) == 0
-    err = capsys.readouterr().err
-    assert "!!!!" in err and "WARNING: no catalog given" in err
+    sf.write(src, pink(sr * 240, sr), sr)
+    stub_detector([dict(t_cpa=120.0, f0=100.0, v=60.0, d=1000.0)])
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--find-flyovers", "--quiet-per-hour", "60"]) == 0
+    out = capsys.readouterr()
+    assert "!!!!" in out.err and "using the bundled catalog instead" in out.err
+    assert "source: bundled" in out.out
+
+
+def test_default_catalog_and_jobs(tmp_path):
+    # no decoy-source option: the bundled catalog; -j changes nothing in the output
+    sr = 8000
+    src = tmp_path / "in.wav"
+    sf.write(src, pink(sr * 600, sr, ch=2, seed=4), sr, subtype="PCM_16")
+    outs = []
+    for j in ("1", "3"):
+        dst, rep = tmp_path / f"o{j}.wav", tmp_path / f"r{j}.json"
+        r = run_cli("protect", src, dst, "-j", j, "--seed", "2", "--report", rep,
+                    "--lead-per-hour", "30", "--quiet-per-hour", "90")
+        assert r.returncode == 0, r.stderr
+        assert "source: bundled: McMaster Forest (Hamilton Naturalists' Club, via the Internet Archive)" in r.stdout
+        assert f"rendered in {j} process" in r.stdout and "WARNING" not in r.stderr
+        meta = json.loads(rep.read_text())
+        assert meta["report"]["catalog"]["source_url"] == "https://archive.org/details/HNCSW720260527"
+        outs.append(sf.read(dst, dtype="float32")[0])
+    assert np.array_equal(*outs)
+    r = run_cli("protect", "--help")
+    assert "--jobs" in r.stdout and "--find-flyovers" in r.stdout and "bundled" in r.stdout
 
 
 @pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")), reason="needs ffmpeg")

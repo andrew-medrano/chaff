@@ -125,3 +125,30 @@ def test_other_format_version_is_refused(stacks, tmp_path):
 def test_empty_catalog_round_trip(tmp_path):
     p = stack.save([], tmp_path / "empty.npz")
     assert stack.load(p) == []
+
+
+def test_catalog_info_round_trip(stacks, tmp_path):
+    p = stack.save(stacks, tmp_path / "c.npz", info=dict(credit="someone", n=2))
+    assert stack.load_info(p) == dict(credit="someone", n=2)
+    assert len(stack.load(p)) == 2
+    assert stack.load_info(stack.save(stacks, tmp_path / "plain.npz")) == {}
+
+
+def test_bundled_catalog():
+    import os
+    import chaff
+    p = chaff.bundled_catalog()
+    assert os.path.basename(p) == "mcmaster.npz" and os.path.getsize(p) < 21e6
+    ks = chaff.load_catalog(p)
+    assert len(ks) == 8 and all(k.usable for k in ks)                 # only stacks a tier can use
+    assert all(k.name.startswith("mcmaster#") and k.s.dtype == np.float32 for k in ks)
+    assert len(stack.eligible(ks, chaff.LEAD.snr_db, chaff.LEAD.headroom_db)) == 6
+    assert len(stack.eligible(ks, chaff.QUIET.snr_db, chaff.QUIET.headroom_db)) == 8
+    info = chaff.catalog_info(p)
+    assert info["credit"] == "Hamilton Naturalists' Club, via the Internet Archive"
+    assert info["source_url"] == "https://archive.org/details/HNCSW720260527"
+    assert "no" in info["licence"] and "HNCSW7" in info["source"]
+    assert [s["name"] for s in info["stacks"]] == [k.name for k in ks]
+    # its README, with the same credit, sits next to it
+    readme = os.path.join(os.path.dirname(p), "README.md")
+    assert info["credit"] in open(readme).read()

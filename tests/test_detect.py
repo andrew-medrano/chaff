@@ -46,9 +46,10 @@ def test_spectrogram_matches_dopplertrack():
 
 @pytest.mark.slow
 def test_protect_self_catalog(planes8):
-    # no catalog: the recording's own flyovers are found and used as decoy sources
+    # find_flyovers: the recording's own flyovers are found and used as decoy sources
     x, sr = planes8
-    y, decoys, rep = chaff.protect(x, sr, seed=1, quiet=chaff.Tier(60.0, (4.0, 10.0), 6.0, chaff.QUIET.limit_db))
+    y, decoys, rep = chaff.protect(x, sr, find_flyovers=True, seed=1,
+                                   quiet=chaff.Tier(60.0, (4.0, 10.0), 6.0, chaff.QUIET.limit_db))
     assert rep["mode"] == "stack", rep["warnings"]
     assert rep["catalog"]["source"].startswith("self") and rep["catalog"]["usable"] >= 2
     assert decoys and y.shape == x.shape and not rep["warnings"]

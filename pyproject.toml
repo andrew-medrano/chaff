@@ -42,4 +42,4 @@ chaff = ["data/mcmaster.npz", "data/README.md"]   # the bundled catalog and its 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
-markers = ["slow: takes more than ~10 s (real flyover detection, the memory check); skip with -m 'not slow'"]
+markers = ["slow: takes more than ~10 s (real flyover detection, the memory check, the wheel build); skip with -m 'not slow'"]

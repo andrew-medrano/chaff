@@ -1,6 +1,7 @@
 """protect() and protect_file(): defaults, tiers, audibility, decoy sources, errors, streaming."""
 import dataclasses
 import inspect
+import warnings
 
 import numpy as np
 import pytest
@@ -40,6 +41,7 @@ def test_defaults_are_the_tested_recipe():
         sig = inspect.signature(fn)
         assert sig.parameters["lead"].default == chaff.LEAD and sig.parameters["quiet"].default == chaff.QUIET
         assert sig.parameters["catalog"].default is None and sig.parameters["synthetic"].default is False
+        assert sig.parameters["find_flyovers"].default is False and sig.parameters["jobs"].default is None
 
 
 @pytest.fixture(scope="module")
@@ -141,10 +143,11 @@ def test_synthetic_mode():
 
 
 def test_self_catalog_mode(planes, stub_detector):
-    # no catalog: the flyovers found in the recording itself become the decoy sources
+    # find_flyovers: the flyovers found in the recording itself become the decoy sources
     x, sr = planes
     stub_detector(EVENTS)
-    y, decoys, rep = chaff.protect(x, sr, seed=3, quiet=dataclasses.replace(chaff.QUIET, per_hour=12.0))
+    y, decoys, rep = chaff.protect(x, sr, find_flyovers=True, seed=3,
+                                   quiet=dataclasses.replace(chaff.QUIET, per_hour=12.0))
     assert rep["mode"] == "stack" and not rep["warnings"]
     c = rep["catalog"]
     assert c["source"].startswith("self") and c["detected"] == 2 and c["usable"] == 2
@@ -153,25 +156,55 @@ def test_self_catalog_mode(planes, stub_detector):
     check_audibility(rep)
 
 
-def test_self_catalog_without_stacks_falls_back_to_synthetic(stub_detector):
-    # the detector "finds" a flyover in plain noise: no engine lines, so synthetic decoys and a warning
+def test_self_catalog_without_stacks_falls_back_to_bundled(stub_detector):
+    # the detector "finds" a flyover in plain noise: no engine lines, so the bundled catalog and a warning
     sr = 8000
     x = pink(sr * 300, sr, seed=2)
     stub_detector([dict(t_cpa=150.0, f0=100.0, v=60.0, d=1000.0)])
-    with pytest.warns(chaff.ChaffWarning, match="falling back to synthetic decoys"):
-        y, decoys, rep = chaff.protect(x, sr)
-    assert rep["mode"] == "synthetic" and rep["catalog"]["detected"] == 1 and rep["catalog"]["usable"] == 0
+    with pytest.warns(chaff.ChaffWarning, match="using the bundled catalog instead"):
+        y, decoys, rep = chaff.protect(x, sr, find_flyovers=True, **FEW)
+    assert rep["mode"] == "stack" and rep["catalog"]["source"].startswith("bundled")
+    assert rep["catalog"]["self"]["detected"] == 1
     assert decoys and rep["warnings"] and y.shape == x.shape
+    assert all(d.src_name.startswith("mcmaster#") for d in decoys)
 
 
-def test_no_catalog_without_dopplertrack_falls_back_with_warning(monkeypatch):
-    monkeypatch.setattr(detect, "available", lambda: False)
+def test_find_flyovers_without_dopplertrack_is_an_error(monkeypatch):
+    def missing():
+        raise ImportError("finding flyovers needs dopplertrack: pip install 'chaff[detect]'")
+    monkeypatch.setattr(detect, "_api", missing)
     sr = 8000
     x = pink(sr * 300, sr, seed=2)
-    with pytest.warns(chaff.ChaffWarning, match="synthetic decoys"):
-        y, decoys, rep = chaff.protect(x, sr)
-    assert rep["mode"] == "synthetic" and rep["warnings"] and len(decoys) > 0
-    assert "not installed" in rep["catalog"]["source"]
+    with pytest.raises(ImportError, match="chaff\\[detect\\]"):
+        chaff.protect(x, sr, find_flyovers=True)
+
+
+def test_default_is_the_bundled_catalog(monkeypatch):
+    # no catalog, no dopplertrack needed: the bundled catalog, and no warning
+    monkeypatch.setattr(detect, "_api", lambda: (_ for _ in ()).throw(AssertionError("detector used")))
+    sr = 8000
+    x = pink(sr * 240, sr, seed=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", chaff.ChaffWarning)
+        y, decoys, rep = chaff.protect(x, sr, seed=4, **FEW)
+    c = rep["catalog"]
+    assert rep["mode"] == "stack" and not rep["warnings"] and decoys
+    assert c["source"].startswith("bundled") and c["path"] == chaff.bundled_catalog()
+    assert c["credit"] == "Hamilton Naturalists' Club, via the Internet Archive"
+    assert {d.tier for d in decoys} == {"lead", "quiet"}
+    assert all(d.src_name.startswith("mcmaster#") for d in decoys)
+    check_audibility(rep)
+    # the same as passing the bundled catalog's path
+    y2, decoys2, _ = chaff.protect(x, sr, chaff.bundled_catalog(), seed=4, **FEW)
+    assert np.array_equal(y, y2) and [d.to_dict() for d in decoys] == [d.to_dict() for d in decoys2]
+
+
+def test_one_decoy_source_at_a_time(stacks):
+    x = pink(8000 * 120, 8000)
+    for kw in (dict(catalog=stacks, synthetic=True), dict(catalog=stacks, find_flyovers=True),
+               dict(find_flyovers=True, synthetic=True)):
+        with pytest.raises(ValueError, match="one decoy source"):
+            chaff.protect(x, 8000, **kw)
 
 
 def test_unusable_catalog_is_an_error(stacks):

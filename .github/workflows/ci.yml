@@ -24,3 +24,8 @@ jobs:
         # dopplertrack is not installed here, so the real-detector tests skip;
         # the same code paths run with a stub detector
         run: python -m pytest -q
+      - name: The wheel contains the bundled catalog
+        run: |
+          python -m pip install build
+          python -m build --wheel -o dist .
+          python -c "import glob, zipfile; n = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); assert {'chaff/data/mcmaster.npz', 'chaff/data/README.md'} <= set(n), n"

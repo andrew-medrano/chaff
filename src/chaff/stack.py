@@ -183,8 +183,24 @@ def extract(read, sr, n_samples, ev, floor: NoiseFloor, half_s=300.0, name="", l
                  _iso_snr_db(s_iso, tau_cpa, f0, v, d, floor_ref), floor_ref, bb, u_bb)
 
 
-def save(stacks, path):
-    """Write a catalog. Returns the path written (numpy adds .npz if missing)."""
+BUNDLED = "mcmaster.npz"     # in chaff/data
+
+
+def bundled_path() -> str:
+    """Path of the catalog that ships with chaff (chaff/data/mcmaster.npz): engine-line stacks
+    of 8 flyovers from the Hamilton Naturalists' Club's McMaster Forest recordings, via the
+    Internet Archive. load_info() of it gives the source and credit."""
+    from importlib.resources import files
+    p = files("chaff").joinpath("data", BUNDLED)
+    if not p.is_file():
+        raise FileNotFoundError(f"the bundled catalog {p} is missing from this chaff installation; "
+                                "reinstall chaff, or pass a catalog")
+    return os.fspath(p)
+
+
+def save(stacks, path, info=None):
+    """Write a catalog. info: optional JSON-able dict about the catalog as a whole (source,
+    credit, ...), read back with load_info(). Returns the path written (.npz is added if missing)."""
     path = os.fspath(path)
     if not path.endswith(".npz"):
         path += ".npz"
@@ -196,25 +212,39 @@ def save(stacks, path):
         arrays[f"lines{i}"] = np.asarray(k.lines, np.float32).reshape(-1, 2)
         arrays[f"bb{i}"] = np.asarray(k.bb, np.float32)
         arrays[f"ubb{i}"] = np.asarray(k.u_bb, np.float64)
+    if info is not None:
+        arrays["info"] = np.array(json.dumps(info))
     np.savez_compressed(path, format=np.array(FORMAT), version=np.array(FORMAT_VERSION),
                         meta=np.array(json.dumps(meta)), **arrays)
     return path
 
 
-def load(path) -> list[Stack]:
-    """Read a catalog written by save() / `chaff catalog`. Never unpickles."""
+def _open(path):
     try:
         z = np.load(path, allow_pickle=False)
     except (zipfile.BadZipFile, ValueError, EOFError) as e:
         raise ValueError(f"{path} is not a chaff catalog ({e})") from e
     if not hasattr(z, "files"):
         raise ValueError(f"{path} is not a chaff catalog (not an .npz archive)")
-    with z:
-        if "format" not in z.files or str(z["format"]) != FORMAT:
-            raise ValueError(f"{path} is not a chaff catalog (catalogs made before chaff 0.2 must be rebuilt with `chaff catalog`)")
-        ver = int(z["version"])
-        if ver != FORMAT_VERSION:
-            raise ValueError(f"{path} is catalog format {ver}; this chaff reads format {FORMAT_VERSION}. Rebuild it with `chaff catalog`.")
+    if "format" not in z.files or str(z["format"]) != FORMAT:
+        z.close()
+        raise ValueError(f"{path} is not a chaff catalog (catalogs made before chaff 0.2 must be rebuilt with `chaff catalog`)")
+    ver = int(z["version"])
+    if ver != FORMAT_VERSION:
+        z.close()
+        raise ValueError(f"{path} is catalog format {ver}; this chaff reads format {FORMAT_VERSION}. Rebuild it with `chaff catalog`.")
+    return z
+
+
+def load_info(path) -> dict:
+    """The catalog-wide metadata given to save(info=...) (source, credit, ...), or {}."""
+    with _open(path) as z:
+        return json.loads(str(z["info"])) if "info" in z.files else {}
+
+
+def load(path) -> list[Stack]:
+    """Read a catalog written by save() / `chaff catalog`. Never unpickles."""
+    with _open(path) as z:
         meta = json.loads(str(z["meta"]))
         return [Stack(m["name"], m["f0"], m["v"], m["d"], m["tau_cpa"], z[f"s{i}"].astype(np.float32),
                       z[f"lines{i}"].reshape(-1, 2), m["iso_snr_db"], m["floor_ref"], z[f"bb{i}"], z[f"ubb{i}"])

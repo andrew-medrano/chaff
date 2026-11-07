@@ -21,10 +21,12 @@ finds such events on the warped clock and pulls the line bins back down where th
   standard deviations of this mean in plain background) above is a transient, and so is one whose
   mean over a third of the band (about 230 Hz) is more than TRANSIENT_PART_DB (10 dB, also about 4)
   above: knocks and thumps can be low-pitched. Means over many bins make it broadband-only: a bird
-  or a voice lifts a few bins, a click lifts them all. The 0.5 s median makes it short-only: fades,
-  the swell near closest approach, gradual dashes, and the half-second-or-longer bursts of roar
-  and flicker a real plane makes near closest approach do not count. The engine lines themselves
-  are not looked at.
+  or a voice lifts a few bins, a click lifts them all. The 0.5 s median makes it short-only:
+  events up to about a quarter second (half the median) stand out against it. Longer ones lift
+  the median too. At about 10 dB over the background, broadband bursts of 0.3 to 0.5 s are not
+  detected; at 15 dB or more a burst of any length is, but one longer than the median only at
+  its start and end, so only those frames are repaired. Fades, the swell near closest approach
+  and gradual dashes do not count. The engine lines themselves are not looked at.
 - Repair. In each 2 s line-resolution frame (NFFT) whose window overlaps a transient, each kept bin
   is limited to TRANSIENT_MARGIN_DB (3 dB) above its reference level: its median magnitude over up
   to TRANSIENT_CTX unmarked frames (2.6 s) before and after, interpolated in dB across the run of
@@ -63,7 +65,7 @@ FORMAT_VERSION = 2
 TRANSIENT_DB = 6.0   # a 32 ms window whose off-line band is this far (mean dB) over its running median is a transient
 TRANSIENT_PART_DB = 10.0  # ... or any third of that band this far (knocks and thumps can be low-pitched)
 TRANSIENT_N = 64     # transient detection window, samples at SYN_SR (32 ms; hop is half of it)
-TRANSIENT_REF_S = 0.5  # running median a detection window is compared with: only shorter events count
+TRANSIENT_REF_S = 0.5  # running median a detection window is compared with: events up to about half of it count
 TRANSIENT_CTX = 10   # unmarked frames (2.6 s) on each side that a repair takes its reference level from
 TRANSIENT_MARGIN_DB = 3.0   # in a repaired frame, a line bin may stay this far above its reference level
 

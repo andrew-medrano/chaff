@@ -116,11 +116,12 @@ via the Internet Archive.*
    only the bins that stay lines through the pass. A flyover becomes a decoy source only if at least 3 distinct
    engine lines survive. A click or knock in the recording is the exception: it is broadband, so it lands in every
    kept bin at once and would come out as a column of dots across all of a decoy's lines, which no real plane
-   makes. Before keeping the lines, chaff finds events shorter than about a quarter second that lift the whole
+   makes. Before keeping the lines, chaff finds events up to about a quarter second long that lift the whole
    spectrum between the lines at once (or a third of it by a wider margin). In the 2 s analysis frames they touch,
-   it pulls each line down to no more than 3 dB over its own level in the seconds around. Slower changes (fades,
-   the swell near closest approach, a plane's own flicker) are not touched, and a flyover without clicks is kept bit
-   for bit.
+   it pulls each line down to no more than 3 dB over its own level in the seconds around. Longer broadband sounds
+   are mostly kept (a loud one is trimmed only at its start and end; see [Limits](#limits-and-threat-model)).
+   Slower changes (fades, the swell near closest approach) are not touched, and a flyover without clicks is kept
+   bit for bit.
 2. **Re-Doppler.** Each decoy lays that isolated stack onto a new, physically valid pass. It gets a new blade rate
    (×0.6 to ×1.2), speed (×0.8 to ×1.25), closest distance (×0.6 to ×1.7) and time. A phase-vocoder stretch changes
    pitch and timing independently. Each engine line is pushed up or down by -6 to +3 dB, sections fade in and out,
@@ -234,7 +235,7 @@ Loudest auditory band re background, and the share of band-seconds over the hear
 |---|---|---|---|
 | [R] McMaster, Oyster Bay, railcam, eagle cam, as tested | not measured on its own | not measured on its own | +19.5 dB; 12.2% to 12.8% over |
 | [R] Oyster Bay, quiet tier re-rendered later with the same seeds | +10.5 dB; 1.8% over | | |
-| [L] Oyster Bay, default settings, development catalog (chaff 0.3.0, before the click repair; the bundled catalog draws the same decoys), seed 101 | -7.5 dB; 0% over | +19.5 dB; 11.3% over | +19.5 dB; 11.4% over |
+| [L] Oyster Bay, default settings, development catalog (chaff 0.3.0, before the click repair; a repaired catalog draws the same decoy parameters, but its decoys' levels can differ by several dB; not re-measured), seed 101 | -7.5 dB; 0% over | +19.5 dB; 11.3% over | +19.5 dB; 11.4% over |
 
 On the railcam and eagle cam, whose planes are faint, the lead decoys are louder than any real plane in the
 recording. No listening test has been done.
@@ -249,8 +250,15 @@ recording. No listening test has been done.
 3. **Click repair** (chaff 0.3.1). The research recipe kept broadband clicks from the source recordings in the
    stacks, where each became a column of dots across a decoy's lines. The library repairs them when it extracts a
    stack (step 1 of [How it works](#how-it-works)). In the bundled catalog this changes 7 of the 8 stacks, most of
-   all `mcmaster#5`, and only in the 2 s frames around the clicks; the levels, engine lines and decoy draws are
-   unchanged. The tested runs used these stacks with their clicks.
+   all `mcmaster#5`, and each stack only in the 2 s frames around its clicks; its engine lines and isolated SNR
+   are unchanged, and a seed draws the same decoy parameters. The rendered decoys change more widely. The
+   phase-vocoder stretch carries each bin's phase forward, so the fine flicker of the lines differs everywhere
+   after a stack's first repaired spot. A decoy's gain is set from the median level of its fundamental in about
+   10 frames around closest approach, so that flicker can move a whole decoy's level by several dB: the lead
+   decoy from `mcmaster#5` in the before/after figure is calibrated 11.4 dB up instead of 4.0 dB, and is 3 to
+   7.5 dB louder after the limiter from 16:50 to 16:52. Any change to a stack can shift levels this way, so the
+   [L] loudness above (measured before the repair) may differ by more than the click frames suggest. The tested
+   runs used these stacks with their clicks.
 
 Before the click repair, and with the line rule turned off, the library rendered the tested decoys to within 2e-7 of
 the research recipe, and its background and stack extraction were bit-identical; stacks without clicks still are.
@@ -284,8 +292,10 @@ tests did not measure.
   development check, a random forest told them from real detected flyovers with AUC 0.88 (5-fold cross-validation,
   20 real, 52 decoys). They were not tested against the attack.
 - **Clicks the repair misses.** It looks for short broadband events. A short tonal sound that falls on a stack's own
-  lines (the bundled catalog keeps one, a three-harmonic chirp 5.6 s from the start of `mcmaster#10`) and
-  broadband sound lasting longer than about half a second stay in the stack, and in every decoy made from it.
+  lines (the bundled catalog keeps one, a three-harmonic chirp 5.6 s from the start of `mcmaster#10`) stays in
+  the stack, and in every decoy made from it. So does most broadband sound longer than about a quarter second: at
+  about 10 dB over the background, bursts of 0.3 to 0.5 s are not detected; at 15 dB or more, a burst of any
+  length is, but a long one is repaired only at its start and end, and its middle stays.
   `scripts/transient_tell.py` measures how often a catalog's decoys show columns of simultaneous spikes.
 - **Detection misses planes.** On a 12 h test file, dopplertrack's detector found 10 of 24 loud synthetic flyovers;
   9 of its 20 detections were usable as decoy sources.

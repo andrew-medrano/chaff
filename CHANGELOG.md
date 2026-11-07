@@ -12,8 +12,11 @@
   clock, everything between the lines is looked at in 32 ms windows against its own 0.5 s running median; a window
   whose whole band is up by more than 6 dB on average, or a third of the band by more than 10 dB, is a transient.
   In each 2 s frame it touches, every kept line bin is limited to 3 dB over its own level in the 2.6 s before and
-  after. Slower changes (fades, the swell near closest approach, a plane's own bursts of roar and flicker) do not
-  register; a flyover without clicks gives the same stack bit for bit. See `chaff/stack.py`.
+  after. Events up to about a quarter second are caught. Broadband sound longer than that is mostly kept: at about
+  10 dB over the background, bursts of 0.3 to 0.5 s are not detected; at 15 dB or more, a burst of any length is
+  detected, but a long one only at its start and end, which are repaired and its middle kept. Fades and the swell
+  near closest approach do not register; a flyover without clicks gives the same stack bit for bit. See
+  `chaff/stack.py`.
 - `Stack.repaired_s` (saved in catalogs; 0 for older ones) says how much of the warped clock was touched, and
   `chaff catalog` prints it. The catalog format is unchanged: older catalogs load, with their clicks.
 - This is a new difference from the tested research recipe (README, "Differences between [R] and [L]"). The attack
@@ -22,8 +25,14 @@
 ### Bundled catalog, data version 2
 
 - `chaff/data/mcmaster.npz` is rebuilt with the repair: the same 8 flyovers, engine lines, isolated SNRs and
-  credit metadata, so the same decoys are drawn for a seed; 7 of the 8 stacks change around their clicks, most
-  of all `mcmaster#5` (64 s of its warped clock touched). 20.2 MB. Its metadata gains `data_version` (2) and
+  credit metadata, so a seed draws the same decoy parameters; 7 of the 8 stacks change around their clicks, most
+  of all `mcmaster#5` (64 s of its warped clock touched). The rendered decoys from those stacks are not the same,
+  though, and not only near the clicks: the phase-vocoder stretch carries each bin's phase forward, so the fine
+  flicker of the lines differs everywhere after a stack's first repaired spot (24 s into `mcmaster#5`, so all of
+  it). A decoy's gain is set from the median level of its fundamental in about 10 frames around closest
+  approach, so that flicker can move a whole decoy's level by several dB: the README's lead decoy from
+  `mcmaster#5` is calibrated 11.4 dB up instead of 4.0 dB, and after the limiter is 3 to 7.5 dB louder from
+  16:50 to 16:52. Any change to a stack can shift whole-decoy levels this way. 20.2 MB. Its metadata gains `data_version` (2) and
   `built_with`, and each stack's `clicks_repaired_s`.
 - `scripts/build_bundled_catalog.py` rebuilds it from the McMaster recording and `scripts/mcmaster_events.json`
   (the 10 detections it was made from), so the file is reproducible.

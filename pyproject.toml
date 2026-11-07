@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chaff"
-version = "0.3.0"
+version = "0.3.1"
 description = "Add realistic decoy propeller flyovers to a recording so that locating it by matching aircraft Doppler curves to flight tracks cannot trust what it finds."
 readme = "README.md"
 license = "MIT"

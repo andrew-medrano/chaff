@@ -148,7 +148,9 @@ def extract_stacks(source, n, floor, events, top=None, log=None, notes=None):
         else:
             out.append(k)
             log(f"  {k.name}: t_cpa {e['t_cpa']:.0f} s, f0 {k.f0:.1f} Hz, {k.n_lines} engine lines, "
-                f"isolated SNR {k.iso_snr_db:.1f} dB{'' if k.usable else ' (fewer than 3 lines: not used)'}")
+                f"isolated SNR {k.iso_snr_db:.1f} dB"
+                f"{f', clicks repaired over {k.repaired_s:.0f} s' if k.repaired_s else ''}"
+                f"{'' if k.usable else ' (fewer than 3 lines: not used)'}")
             continue
         log("  " + msg)
         if notes is not None:

@@ -9,6 +9,29 @@ pass are kept. A decoy re-Dopplers that isolated stack onto a new pass (new blad
 distance, time), with lines pushed up or down individually and sections faded, and levels it to
 the new recording's background.
 
+Short broadband events in the source recording (a click, a knock, a twig snapping) fall into every
+kept line bin at once. Left alone, each would survive as one dot per engine line, at the same
+instant in every line, in every decoy made from the stack; no real plane does that. So extract()
+finds such events on the warped clock and pulls the line bins back down where they touch them
+(transient_frames, _repair):
+
+- Detect. Everything except the line bins, 40 Hz to F_TOP / 1.3 (where lines are kept), is looked
+  at in 32 ms windows (31 Hz bins), each bin in dB against its own running median over 0.5 s
+  (TRANSIENT_REF_S). A window whose mean over the band is more than TRANSIENT_DB (6 dB, about 4
+  standard deviations of this mean in plain background) above is a transient, and so is one whose
+  mean over a third of the band (about 230 Hz) is more than TRANSIENT_PART_DB (10 dB, also about 4)
+  above: knocks and thumps can be low-pitched. Means over many bins make it broadband-only: a bird
+  or a voice lifts a few bins, a click lifts them all. The 0.5 s median makes it short-only: fades,
+  the swell near closest approach, gradual dashes, and the half-second-or-longer bursts of roar
+  and flicker a real plane makes near closest approach do not count. The engine lines themselves
+  are not looked at.
+- Repair. In each 2 s line-resolution frame (NFFT) whose window overlaps a transient, each kept bin
+  is limited to TRANSIENT_MARGIN_DB (3 dB) above its reference level: its median magnitude over up
+  to TRANSIENT_CTX unmarked frames (2.6 s) before and after, interpolated in dB across the run of
+  marked frames. Only bins above that limit are scaled down, phase kept; the inverse STFT's overlap
+  of 2 s windows makes the gain change smoothly. A stack with no transient is unchanged, bit for
+  bit. Stack.repaired_s is how much of the warped clock was marked.
+
 A catalog is a list of Stack objects, saved as an .npz of plain arrays plus JSON metadata (no
 pickle, so loading a catalog someone else made cannot run code).
 """
@@ -37,12 +60,21 @@ RATE = 20.0          # control rate of the broadband-roar envelope, Hz
 MIN_LINES = 3        # a stack needs this many distinct engine lines to be used as a decoy source
 FORMAT = "chaff-stacks"
 FORMAT_VERSION = 2
+TRANSIENT_DB = 6.0   # a 32 ms window whose off-line band is this far (mean dB) over its running median is a transient
+TRANSIENT_PART_DB = 10.0  # ... or any third of that band this far (knocks and thumps can be low-pitched)
+TRANSIENT_N = 64     # transient detection window, samples at SYN_SR (32 ms; hop is half of it)
+TRANSIENT_REF_S = 0.5  # running median a detection window is compared with: only shorter events count
+TRANSIENT_CTX = 10   # unmarked frames (2.6 s) on each side that a repair takes its reference level from
+TRANSIENT_MARGIN_DB = 3.0   # in a repaired frame, a line bin may stay this far above its reference level
 
 
-def stft_gain(x, g, n=NFFT, hop=NFFT // 8, block=256):
+def stft_gain(x, g, n=NFFT, hop=NFFT // 8, block=256, frame_gain=None):
     """istft(stft(x) * g[:, None]) with scipy's conventions (Hann, 'spectrum' scaling, no
     boundary padding), computed a block of frames at a time so a long flyover needs only a few
     MB. g: real gain per frequency bin (n // 2 + 1). Equal to the scipy round trip to rounding.
+
+    frame_gain: optional (rows, frames, gains): bins `rows` (int array) of frames `frames` (sorted
+    int array) are also multiplied by `gains` (real, len(rows) x len(frames)).
 
     Like scipy's (boundary=False), the first sample has zero window sum and is left as is."""
     x = np.asarray(x)
@@ -53,7 +85,13 @@ def stft_gain(x, g, n=NFFT, hop=NFFT // 8, block=256):
         k1 = min(k0 + block, K)
         _, _, Z = ss.stft(x[k0 * hop:(k1 - 1) * hop + n], SYN_SR, window="hann", nperseg=n, noverlap=n - hop,
                           boundary=None, padded=False)
-        xs = sp_fft.irfft(Z * g[:, None], axis=0, n=n)[:n]
+        Zg = Z * g[:, None]
+        if frame_gain is not None:
+            rows, frames, gains = frame_gain
+            j0, j1 = np.searchsorted(frames, [k0, k1])
+            if j1 > j0:
+                Zg[np.ix_(rows, frames[j0:j1] - k0)] *= gains[:, j0:j1]
+        xs = sp_fft.irfft(Zg, axis=0, n=n)[:n]
         xs *= win.sum()
         for j in range(k1 - k0):
             i = (k0 + j) * hop
@@ -78,6 +116,78 @@ def _stft_power_rows(x, rows, n=NFFT, hop=NFFT // 8, block=512):
     return f, t, np.concatenate(Ps, axis=1)
 
 
+def _stft_rows(x, rows, n=NFFT, hop=NFFT // 8, block=512):
+    """Complex STFT (stft_gain's frames and scaling) of the frequency rows `rows` (int array)."""
+    K = (len(x) - n) // hop + 1
+    out = np.empty((len(rows), K), complex)
+    for k0 in range(0, K, block):
+        k1 = min(k0 + block, K)
+        _, _, Z = ss.stft(x[k0 * hop:(k1 - 1) * hop + n], SYN_SR, window="hann", nperseg=n, noverlap=n - hop,
+                          boundary=None, padded=False)
+        out[:, k0:k1] = Z[rows]
+    return out
+
+
+def transient_frames(x, keep, n=NFFT, hop=NFFT // 8, db=None):
+    """(K,) bool: the STFT frames (n, hop, as stft_gain's) of x that a short broadband event touches.
+
+    keep: bool per bin of that STFT, the line bins, which are left out of the detection. The rest
+    of x is looked at in TRANSIENT_N-sample windows (hop half that), 40 Hz to F_TOP / 1.3, each bin
+    in dB re its own running median over TRANSIENT_REF_S. A window whose mean over the band exceeds
+    `db` (default TRANSIENT_DB), or whose mean over a third of the band exceeds TRANSIENT_PART_DB,
+    is a transient, and every frame whose window overlaps it is marked."""
+    db = TRANSIENT_DB if db is None else db
+    K = (len(x) - n) // hop + 1
+    if K < 1:
+        return np.zeros(0, bool)
+    rest = stft_gain(x, 1.0 - np.asarray(keep, float), n, hop)
+    m, h = TRANSIENT_N, TRANSIENT_N // 2
+    f, _, Q = ss.stft(rest, SYN_SR, window="hann", nperseg=m, noverlap=m - h, boundary=None, padded=False)
+    del rest
+    L = np.log(np.abs(Q[(f > 40) & (f < F_TOP / 1.3)]) ** 2 + 1e-30)
+    del Q
+    w = int(TRANSIENT_REF_S * SYN_SR / h) // 2 * 2 + 1          # running-median length, windows
+    E = (10 / np.log(10)) * (L - median_filter(L, size=(1, w), mode="nearest"))
+    del L
+    hit = E.mean(0) > db                                    # the whole band, or a third of it by more
+    for part in np.array_split(np.arange(len(E)), 3):
+        hit |= E[part].mean(0) > TRANSIENT_PART_DB
+    a = np.flatnonzero(hit) * h                             # first sample of each transient window
+    lo = np.clip((a - n) // hop + 1, 0, K)                  # frames k with k*hop < a + m and k*hop + n > a
+    hi = np.clip((a + m - 1) // hop + 1, 0, K)
+    d = np.zeros(K + 1, int)
+    np.add.at(d, lo, 1); np.add.at(d, hi, -1)
+    return np.cumsum(d)[:K] > 0
+
+
+def _repair(x, keep, mark, n=NFFT, hop=NFFT // 8, ctx=TRANSIENT_CTX, margin_db=TRANSIENT_MARGIN_DB):
+    """stft_gain's frame_gain for the kept bins of the marked frames, or None if nothing is marked.
+
+    For each run of marked frames, each kept bin's reference level is its median magnitude over up
+    to ctx unmarked frames before the run and up to ctx after, interpolated in dB across the run
+    (one side at the ends of x). In the run, a bin above reference + margin_db is scaled down to it;
+    phase and everything below are left alone, so a frame marked for nothing is unchanged."""
+    rows, frames = np.flatnonzero(keep), np.flatnonzero(mark)
+    if not len(rows) or not len(frames):
+        return None
+    A = np.log(np.abs(_stft_rows(x, rows, n, hop)) + 1e-30)
+    um = np.flatnonzero(~np.asarray(mark, bool))
+    lim = np.full((len(rows), len(frames)), np.inf)
+    edges = np.flatnonzero(np.diff(np.concatenate([[0], np.asarray(mark, np.int8), [0]])))
+    for k0, k1 in zip(edges[::2], edges[1::2]):             # a run: frames k0 .. k1 - 1
+        left, right = um[um < k0][-ctx:], um[um >= k1][:ctx]
+        if not (len(left) or len(right)):
+            continue
+        mL = np.median(A[:, left], axis=1) if len(left) else np.median(A[:, right], axis=1)
+        mR = np.median(A[:, right], axis=1) if len(right) else mL
+        r = (np.arange(k0, k1) - (k0 - 1)) / (k1 - (k0 - 1))
+        j0 = np.searchsorted(frames, k0)
+        lim[:, j0:j0 + k1 - k0] = mL[:, None] * (1 - r) + mR[:, None] * r
+    lim += margin_db * np.log(10) / 20
+    gain = np.exp(np.minimum(lim - A[:, frames], 0.0))
+    return rows, frames, gain
+
+
 @dataclass
 class Stack:
     name: str
@@ -89,6 +199,7 @@ class Stack:
     floor_ref: float               # source background per bin at f0 near closest approach
     bb: np.ndarray                 # broadband excess power re background (450-950 Hz), on u_bb
     u_bb: np.ndarray               # normalised time (t - t_cpa) * v / d
+    repaired_s: float = 0.0        # warped-clock seconds the click repair touched (0 before chaff 0.3.1)
 
     @property
     def lines_hz(self) -> np.ndarray:
@@ -175,14 +286,18 @@ def extract(read, sr, n_samples, ev, floor: NoiseFloor, half_s=300.0, name="", l
     nb = np.exp(uniform_filter1d(np.log(med + 1e-30), 41))       # local level around each bin
     line = (10 * np.log10(med / nb) > line_db) & (f > 40) & (f < F_TOP / 1.3)
     keep = maximum_filter1d(line.astype(float), 3) > 0              # line +- one bin
-    s_iso = stft_gain(s2, keep.astype(float))[:len(s2)].astype(np.float32)
+    # clicks and knocks would survive as a dot in every line at once: pull the lines down where they touch
+    mark = transient_frames(s2, keep)
+    s_iso = stft_gain(s2, keep.astype(float), frame_gain=_repair(s2, keep, mark))[:len(s2)]
+    s_iso = s_iso.astype(np.float32)
     floor_ref = float(floor.at(np.array([f0]), np.array([t_cpa]))[0])
     # broadband roar, from the +-(half_s + 10) s around closest approach
     a2 = max(t_cpa - half_s - 10, 0.0); b2 = min(t_cpa + half_s + 10, dur)
     x2 = resample(seg[int(a2 * sr) - i0:int(b2 * sr) - i0], sr, SYN_SR).astype(np.float64)
     bb, u_bb = _broadband_excess(x2, a2, t_cpa, v, d, f0, floor)
     return Stack(name, f0, v, d, tau_cpa, s_iso, _group_lines(f, line, keep),
-                 _iso_snr_db(s_iso, tau_cpa, f0, v, d, floor_ref), floor_ref, bb, u_bb)
+                 _iso_snr_db(s_iso, tau_cpa, f0, v, d, floor_ref), floor_ref, bb, u_bb,
+                 float(mark.sum() * hop / SYN_SR) if keep.any() else 0.0)
 
 
 BUNDLED = "mcmaster.npz"     # in chaff/data
@@ -226,7 +341,8 @@ def save(stacks, path, info=None):
     if not path.endswith(".npz"):
         path += ".npz"
     meta = [dict(name=k.name, f0=float(k.f0), v=float(k.v), d=float(k.d), tau_cpa=float(k.tau_cpa),
-                 iso_snr_db=float(k.iso_snr_db), floor_ref=float(k.floor_ref)) for k in stacks]
+                 iso_snr_db=float(k.iso_snr_db), floor_ref=float(k.floor_ref), repaired_s=float(k.repaired_s))
+            for k in stacks]
     arrays = {}
     for i, k in enumerate(stacks):
         arrays[f"s{i}"] = k.s.astype(np.float16)
@@ -268,7 +384,8 @@ def load(path) -> list[Stack]:
     with _open(path) as z:
         meta = json.loads(str(z["meta"]))
         return [Stack(m["name"], m["f0"], m["v"], m["d"], m["tau_cpa"], z[f"s{i}"].astype(np.float32),
-                      z[f"lines{i}"].reshape(-1, 2), m["iso_snr_db"], m["floor_ref"], z[f"bb{i}"], z[f"ubb{i}"])
+                      z[f"lines{i}"].reshape(-1, 2), m["iso_snr_db"], m["floor_ref"], z[f"bb{i}"], z[f"ubb{i}"],
+                      m.get("repaired_s", 0.0))
                 for i, m in enumerate(meta)]
 
 

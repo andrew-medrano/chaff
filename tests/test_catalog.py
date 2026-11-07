@@ -148,7 +148,35 @@ def test_bundled_catalog():
     assert info["credit"] == "Hamilton Naturalists' Club, via the Internet Archive"
     assert info["source_url"] == "https://archive.org/details/HNCSW720260527"
     assert "no" in info["licence"] and "HNCSW7" in info["source"]
+    assert info["data_version"] == 2                                  # 0.3.1: clicks repaired
+    assert [k.name for k in ks] == [f"mcmaster#{i}" for i in (1, 2, 3, 4, 5, 7, 9, 10)]
+    assert [s["clicks_repaired_s"] for s in info["stacks"]] == [round(k.repaired_s, 1) for k in ks]
+    assert [k.name for k in ks if k.repaired_s == 0] == ["mcmaster#7"]
+    assert max(ks, key=lambda k: k.repaired_s).name == "mcmaster#5"          # the one with the most clicks
     assert [s["name"] for s in info["stacks"]] == [k.name for k in ks]
     # its README, with the same credit, sits next to it
     readme = os.path.join(os.path.dirname(p), "README.md")
     assert info["credit"] in open(readme).read()
+
+
+def _line_columns(k, db=10.0):
+    """Frames of a stack where at least half of its engine lines (and at least 3) are more than db
+    over their own 8 s running median at once: what a click left in the stack looks like."""
+    from scipy.ndimage import median_filter
+    f, t, P = stack._stft_power_rows(k.s.astype(np.float64), lambda f: f <= 1000)
+    f = f[:P.shape[0]]
+    L = np.array([10 * np.log10(P[(f >= lo - 0.5) & (f <= hi + 0.5)].sum(0) + 1e-30) for lo, hi in k.lines])
+    spikes = (L - median_filter(L, size=(1, 31), mode="nearest") > db).sum(0)
+    col = spikes >= max(3, len(L) / 2)
+    col[:16] = col[-16:] = False                                      # the first and last 4 s
+    return t[col] - k.tau_cpa
+
+
+def test_bundled_catalog_has_no_click_columns():
+    import chaff
+    cols = {k.name: _line_columns(k) for k in chaff.load_catalog(chaff.bundled_catalog())}
+    # chaff 0.3.0's file had 13 such frames in mcmaster#5 (clicks at -272 and +230 s), one in
+    # mcmaster#2 (-133 s) and one in mcmaster#10. That last one is what is left: a short harmonic
+    # chirp (150/300/450 Hz, on the stack's own harmonics, so not broadband) 5.6 s from its start.
+    assert {n: len(c) for n, c in cols.items() if len(c)} == {"mcmaster#10": 1}
+    assert abs(cols["mcmaster#10"][0] + 344) < 2

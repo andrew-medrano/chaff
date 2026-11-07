@@ -114,7 +114,13 @@ via the Internet Archive.*
    approaches and slow while it recedes. On that clock the Doppler shift is undone, and every engine line becomes a
    steady tone. Steady tones are easy to separate from birds, voices and wind, which do not stay put, so chaff keeps
    only the bins that stay lines through the pass. A flyover becomes a decoy source only if at least 3 distinct
-   engine lines survive.
+   engine lines survive. A click or knock in the recording is the exception: it is broadband, so it lands in every
+   kept bin at once and would come out as a column of dots across all of a decoy's lines, which no real plane
+   makes. Before keeping the lines, chaff finds events shorter than about a quarter second that lift the whole
+   spectrum between the lines at once (or a third of it by a wider margin). In the 2 s analysis frames they touch,
+   it pulls each line down to no more than 3 dB over its own level in the seconds around. Slower changes (fades,
+   the swell near closest approach, a plane's own flicker) are not touched, and a flyover without clicks is kept bit
+   for bit.
 2. **Re-Doppler.** Each decoy lays that isolated stack onto a new, physically valid pass. It gets a new blade rate
    (×0.6 to ×1.2), speed (×0.8 to ×1.25), closest distance (×0.6 to ×1.7) and time. A phase-vocoder stretch changes
    pitch and timing independently. Each engine line is pushed up or down by -6 to +3 dB, sections fade in and out,
@@ -149,8 +155,8 @@ The defaults are the tested settings.
 Two sources of numbers appear below, and each is marked:
 
 - **[R]**: the research recipe (`scripts/chaff/make4.py` in the research workspace, v3 settings frozen before each
-  test run). It uses the same decoy method and tier settings as this library, with two differences listed after the
-  tables.
+  test run). It uses the same decoy method and tier settings as this library, with three differences listed after
+  the tables.
 - **[L]**: this library's `chaff protect`.
 
 The held-out attack has not yet been re-run through the library. When it is, the [R] numbers below will be replaced.
@@ -228,7 +234,7 @@ Loudest auditory band re background, and the share of band-seconds over the hear
 |---|---|---|---|
 | [R] McMaster, Oyster Bay, railcam, eagle cam, as tested | not measured on its own | not measured on its own | +19.5 dB; 12.2% to 12.8% over |
 | [R] Oyster Bay, quiet tier re-rendered later with the same seeds | +10.5 dB; 1.8% over | | |
-| [L] Oyster Bay, default settings, development catalog (the bundled catalog gives the same decoys), seed 101 | -7.5 dB; 0% over | +19.5 dB; 11.3% over | +19.5 dB; 11.4% over |
+| [L] Oyster Bay, default settings, development catalog (chaff 0.3.0, before the click repair; the bundled catalog draws the same decoys), seed 101 | -7.5 dB; 0% over | +19.5 dB; 11.3% over | +19.5 dB; 11.4% over |
 
 On the railcam and eagle cam, whose planes are faint, the lead decoys are louder than any real plane in the
 recording. No listening test has been done.
@@ -240,9 +246,15 @@ recording. No listening test has been done.
    decoys are therefore quieter than in the tested runs.
 2. **Engine-line rule.** The research recipe required 3 spectrogram bins; the library requires 3 distinct engine
    lines. On the development catalog this drops 2 weak McMaster flyovers that only the quiet tier could use.
+3. **Click repair** (chaff 0.3.1). The research recipe kept broadband clicks from the source recordings in the
+   stacks, where each became a column of dots across a decoy's lines. The library repairs them when it extracts a
+   stack (step 1 of [How it works](#how-it-works)). In the bundled catalog this changes 7 of the 8 stacks, most of
+   all `mcmaster#5`, and only in the 2 s frames around the clicks; the levels, engine lines and decoy draws are
+   unchanged. The tested runs used these stacks with their clicks.
 
-With the line rule turned off, the library renders the tested decoys to within 2e-7 of the research recipe, and its
-background and stack extraction are bit-identical. The attack has not been re-run with the two changes.
+Before the click repair, and with the line rule turned off, the library rendered the tested decoys to within 2e-7 of
+the research recipe, and its background and stack extraction were bit-identical; stacks without clicks still are.
+The attack has not been re-run with the three changes.
 
 ## Limits and threat model
 
@@ -271,6 +283,10 @@ tests did not measure.
 - **Synthetic decoys** (`--synthetic`) have one fundamental and up to three harmonics, no engine-order lines. In a
   development check, a random forest told them from real detected flyovers with AUC 0.88 (5-fold cross-validation,
   20 real, 52 decoys). They were not tested against the attack.
+- **Clicks the repair misses.** It looks for short broadband events. A short tonal sound that falls on a stack's own
+  lines (the bundled catalog keeps one, a three-harmonic chirp 5.6 s from the start of `mcmaster#10`) and
+  broadband sound lasting longer than about half a second stay in the stack, and in every decoy made from it.
+  `scripts/transient_tell.py` measures how often a catalog's decoys show columns of simultaneous spikes.
 - **Detection misses planes.** On a 12 h test file, dopplertrack's detector found 10 of 24 loud synthetic flyovers;
   9 of its 20 detections were usable as decoy sources.
 - **Processing.** Re-recorded, re-encoded at low bitrate, or heavily filtered protected audio has not been tested.
@@ -328,7 +344,9 @@ states no licence for the recordings.
 
 The 8 are the flyovers, among the recording's top 10 dopplertrack detections, with 3 or more distinct engine lines.
 Six of them are loud enough for the lead tier. The development catalog also held 10 flyovers from the club's Safari
-Road recording; none had more than 1 engine line, so none is included.
+Road recording; none had more than 1 engine line, so none is included. Since chaff 0.3.1 (data version 2) the
+clicks in the recording are repaired in the kept lines (see [How it works](#how-it-works));
+`scripts/build_bundled_catalog.py` rebuilds the file from the recording and the event list next to it.
 [`src/chaff/data/README.md`](src/chaff/data/README.md) lists each stack, and the file carries the same source and
 credit in its metadata (`chaff.catalog_info(chaff.bundled_catalog())`).
 
@@ -336,9 +354,11 @@ credit in its metadata (`chaff.catalog_info(chaff.bundled_catalog())`).
 
 A catalog is an `.npz` of plain arrays plus JSON metadata, loaded with `allow_pickle=False`, so opening a catalog
 someone else made cannot run code. Each stack keeps its isolated de-Dopplered audio at 2 kHz (float16), its engine
-lines, its isolated SNR and its broadband-roar envelope. The file carries a format name and version, and may carry
-catalog-wide JSON metadata (`chaff.save_catalog(stacks, path, info={...})`, read with `chaff.catalog_info`).
-Catalogs from chaff 0.1 are refused and must be rebuilt with `chaff catalog`.
+lines, its isolated SNR, its broadband-roar envelope and how much of it the click repair touched (`repaired_s`).
+The file carries a format name and version, and may carry catalog-wide JSON metadata
+(`chaff.save_catalog(stacks, path, info={...})`, read with `chaff.catalog_info`). Catalogs from chaff 0.1 are
+refused and must be rebuilt with `chaff catalog`. Catalogs built before chaff 0.3.1 still load (the format is
+unchanged) but keep their clicks; rebuild them with `chaff catalog` to repair them.
 
 ## Responsible use
 
@@ -385,7 +405,8 @@ with Python 3.11, 3.12 and 3.13, without dopplertrack.
 
 `docs/make_figures.py` redraws the figures in this README (`docs/images/`, or `--out DIR`), with matplotlib and
 Pillow. It needs the McMaster Forest recording and, for the spot-the-fake figure, files from the research
-workspace; its docstring lists them.
+workspace; its docstring lists them. `scripts/build_bundled_catalog.py` rebuilds the bundled catalog from the same
+recording, and `scripts/transient_tell.py CATALOG.npz ...` measures the click tell in decoys made from catalogs.
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 

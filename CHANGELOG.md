@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.3.1 (2026-11-07)
+
+### Clicks no longer make dot columns in decoys
+
+- A broadband click or knock in a source recording lands in every kept engine-line bin at once, so each one
+  survived in the stack as a dot per line, at the same instant in every line, in every decoy made from it: a column
+  of evenly spaced dots no real plane makes. Stack `mcmaster#5` of the bundled catalog had clicks at -272, -205 and
+  +230 s on its warped clock, visible in the README's before/after figure near 16:47.
+- Stack extraction (`chaff catalog`, `build_catalog`, `--find-flyovers`) now repairs them. On the de-Dopplered
+  clock, everything between the lines is looked at in 32 ms windows against its own 0.5 s running median; a window
+  whose whole band is up by more than 6 dB on average, or a third of the band by more than 10 dB, is a transient.
+  In each 2 s frame it touches, every kept line bin is limited to 3 dB over its own level in the 2.6 s before and
+  after. Slower changes (fades, the swell near closest approach, a plane's own bursts of roar and flicker) do not
+  register; a flyover without clicks gives the same stack bit for bit. See `chaff/stack.py`.
+- `Stack.repaired_s` (saved in catalogs; 0 for older ones) says how much of the warped clock was touched, and
+  `chaff catalog` prints it. The catalog format is unchanged: older catalogs load, with their clicks.
+- This is a new difference from the tested research recipe (README, "Differences between [R] and [L]"). The attack
+  has not been re-run with it.
+
+### Bundled catalog, data version 2
+
+- `chaff/data/mcmaster.npz` is rebuilt with the repair: the same 8 flyovers, engine lines, isolated SNRs and
+  credit metadata, so the same decoys are drawn for a seed; 7 of the 8 stacks change around their clicks, most
+  of all `mcmaster#5` (64 s of its warped clock touched). 20.2 MB. Its metadata gains `data_version` (2) and
+  `built_with`, and each stack's `clicks_repaired_s`.
+- `scripts/build_bundled_catalog.py` rebuilds it from the McMaster recording and `scripts/mcmaster_events.json`
+  (the 10 detections it was made from), so the file is reproducible.
+- `scripts/transient_tell.py` measures the tell in rendered decoys: the share of spectrogram frames in which at
+  least half of a decoy's lines (and at least 3) spike 6 dB over their own running median together. With the same
+  8 passes per stack, `mcmaster#5` went from 0.92% of frames (3.5 columns per decoy) to 0.08% (0.8), within the
+  0 to 0.4% of the other stacks.
+
+### Docs and tests
+
+- README: How it works (step 1), the differences from the research recipe, a limit (what the repair misses), Data
+  and Catalog format. Figures redrawn: the dot columns near 16:47 in the before/after figure are gone; the
+  how-it-works figure changes very little and spot-the-fake (research-recipe decoys) not at all.
+- Tests: a synthetic flyover with injected clicks and a gradual 12 dB dash (clicks removed, the dash and everything
+  away from the clicks unchanged, no change without clicks), and the bundled catalog's version, repaired stacks and
+  absence of click columns.
+
 ## 0.3.0 (2026-11-07)
 
 ### A catalog ships with chaff, and is the default

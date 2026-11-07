@@ -18,13 +18,15 @@ already out.
 ## Install
 
 ```bash
-pip install "chaff[detect] @ git+https://github.com/andrew-medrano/chaff"
+pip install "git+https://github.com/andrew-medrano/chaff"
 ```
 
-- Python 3.10 or newer. Dependencies: numpy, scipy, soundfile.
-- The `detect` extra installs [dopplertrack](https://pypi.org/project/dopplertrack/) 0.3 or newer. It needs
-  Python 3.12+, so on older Pythons the extra installs nothing. chaff uses its detector to find the flyovers in a
-  recording. Without it, chaff works with a catalog or with synthetic decoys.
+- Python 3.10 or newer. Dependencies: numpy, scipy, soundfile. The package includes a 20 MB decoy catalog
+  (see [Data](#data)).
+- `pip install "chaff[detect] @ git+https://github.com/andrew-medrano/chaff"` adds
+  [dopplertrack](https://pypi.org/project/dopplertrack/) 0.3 or newer, needed only to find the flyovers in a
+  recording (`--find-flyovers`, or `chaff catalog` without an events file). It needs Python 3.12+, so on older
+  Pythons the extra installs nothing.
 - [ffmpeg](https://ffmpeg.org/) on `PATH` is needed only for inputs libsndfile cannot read (m4a, webm, video files).
 
 ## Quick start
@@ -33,20 +35,26 @@ pip install "chaff[detect] @ git+https://github.com/andrew-medrano/chaff"
 chaff protect recording.wav protected.wav --report report.json
 ```
 
-chaff finds the planes in the recording, builds decoys from them, and writes the protected file. It prints how loud
-each tier of decoys is relative to the recording's background. If the recording has no plane with a clear set of
-engine lines (or dopplertrack is not installed), chaff falls back to synthetic decoys and prints a boxed warning,
-because synthetic decoys are easier to tell from real planes.
+chaff builds decoys from the catalog that ships with it (real flyovers recorded in McMaster Forest, see
+[Data](#data)), renders them on all cores but one, and writes the protected file. It prints how loud each tier
+of decoys is relative to the recording's background.
 
-A catalog built from recordings with loud, close planes gives better decoys and can be reused:
+Other decoy sources:
 
 ```bash
+chaff protect recording.wav protected.wav --find-flyovers           # this recording's own planes (needs chaff[detect])
+chaff protect recording.wav protected.wav --catalog my_catalog.npz  # a catalog of your own
+chaff protect recording.wav protected.wav --synthetic               # synthetic decoys (easier to tell apart)
+
 chaff catalog my_catalog.npz day1.wav day2.flac             # find the flyovers with dopplertrack
 chaff catalog my_catalog.npz day1.wav day1_events.json      # or list them yourself (t_cpa, f0, v, d)
-chaff protect recording.wav protected.wav --catalog my_catalog.npz
 ```
 
-chaff does not ship a catalog: the recordings it was developed on have no confirmed licence for redistribution.
+With `--find-flyovers`, if no plane in the recording has a clear set of engine lines, chaff uses the bundled
+catalog instead and prints a boxed warning. A catalog built from recordings with loud, close planes can be reused.
+
+`-j N` (`--jobs`) sets how many processes render the decoys; `-j 1` renders in one process. The output is the same
+for any `-j`. Runs with only a few decoys render in one process.
 
 Outputs: `.wav` (32-bit float by default, RF64 past 4 GB), `.flac` (24-bit), `.ogg`, `.mp3`, `.aiff`, `.caf`,
 `.w64`, `.rf64`. Integer and lossy outputs are clipped to full scale and the count of clipped samples is reported.
@@ -57,13 +65,16 @@ From Python:
 ```python
 import chaff
 
-y, decoys, report = chaff.protect(x, sr, catalog="my_catalog.npz")   # x: (N,) or (N, channels)
+y, decoys, report = chaff.protect(x, sr)                              # x: (N,) or (N, channels); bundled catalog
+y, decoys, report = chaff.protect(x, sr, catalog="my_catalog.npz", jobs=4)
+y, decoys, report = chaff.protect(x, sr, find_flyovers=True)          # needs chaff[detect]
 decoys, report = chaff.protect_file("in.wav", "out.wav")              # streamed, any length
 stacks, notes = chaff.build_catalog([("day1.wav", None)])             # None: find the flyovers
 chaff.save_catalog(stacks, "my_catalog.npz")
+chaff.catalog_info(chaff.bundled_catalog())                           # source and credit of the bundled catalog
 ```
 
-Finding flyovers runs dopplertrack's detector in worker processes. A script that does this needs the usual
+Rendering decoys and finding flyovers both run in worker processes. A script that calls chaff needs the usual
 `if __name__ == "__main__":` guard on macOS and Windows; without one, chaff warns and uses a single process.
 
 ## How it works
@@ -169,7 +180,7 @@ Loudest auditory band re background, and the share of band-seconds over the hear
 |---|---|---|---|
 | [R] McMaster, Oyster Bay, railcam, eagle cam, as tested | not measured on its own | not measured on its own | +19.5 dB; 12.2% to 12.8% over |
 | [R] Oyster Bay, quiet tier re-rendered later with the same seeds | +10.5 dB; 1.8% over | | |
-| [L] Oyster Bay, default settings, development catalog, seed 101 | -7.5 dB; 0% over | +19.5 dB; 11.3% over | +19.5 dB; 11.4% over |
+| [L] Oyster Bay, default settings, development catalog (the bundled catalog gives the same decoys), seed 101 | -7.5 dB; 0% over | +19.5 dB; 11.3% over | +19.5 dB; 11.4% over |
 
 On the railcam and eagle cam, whose planes are faint, the lead decoys are louder than any real plane in the
 recording. No listening test has been done.
@@ -203,7 +214,11 @@ tests did not measure.
 - **Audibility.** The lead decoys are audible, like faint distant planes. Their level is set relative to the
   background, not to the recording's own planes, so on recordings with only faint planes they are the loudest
   planes in it.
-- **Decoys from the recording's own planes** (the default without a catalog) are re-laid copies of those planes.
+- **The bundled catalog is public.** Every default decoy is one of its 8 stacks, re-pitched and stretched, with
+  each line moved by -6 to +3 dB. An attacker who has chaff could compare a flyover's pattern of engine lines
+  with those 8 stacks. This has not been tested. A catalog of your own (`--catalog`) or `--find-flyovers` avoids
+  it. The tested runs ([R] above) drew on the same McMaster flyovers, plus the 2 weak ones the library drops.
+- **Decoys from the recording's own planes** (`--find-flyovers`) are re-laid copies of those planes.
   That was the setting on McMaster only; it has not been tested on held-out recordings.
 - **Synthetic decoys** (the fallback) have one fundamental and up to three harmonics, no engine-order lines. In a
   development check, a random forest told them from real detected flyovers with AUC 0.88 (5-fold cross-validation,
@@ -222,31 +237,57 @@ whole signal at once, to within 1e-9 (tested). The finished quiet tier waits in 
 tier is built.
 
 Memory depends on duration, not on sample rate or channel count, and grows slowly: about 0.6 to 0.75 GB for one to
-four hours, about 0.9 to 1.05 GB for 12 hours (both on 8 kHz to 48 kHz input). Measured with
-`/usr/bin/time -l` on an Apple M3 Pro (12 cores, 18 GB). The machine was shared with other jobs (load average 9 to
-60), so the times are on the slow side.
+four hours, about 0.9 to 1.06 GB for 12 hours (both on 8 kHz to 48 kHz input), in the main process. Each render
+worker adds about 0.35 GB while the decoys are rendered; `-j 1` has none. Measured with `/usr/bin/time -l` (main
+process) and by summing the RSS of the worker processes every 2 s, on an Apple M3 Pro (12 cores, 18 GB). The
+machine was shared with other jobs: load average 1.3 to 10 for the first two rows, 9 to 60 for the others, which
+are from chaff 0.2 and so on the slow side.
 
 | Input | Run | Peak RSS | Time |
 |---|---|---|---|
-| 12 h, 48 kHz stereo PCM_16 (8.3 GB) | `--catalog`, 720 decoys | 0.94 GB | 19 min |
-| same | no catalog: finds its own flyovers (9 usable of 20 detected) | 1.05 GB, plus 3.7 GB in 12 detection workers for the first 40 min | 57 min, about 40 of it detection |
-| same | `--synthetic`, 720 decoys | 0.88 GB | 3.2 min |
-| 10 min, 48 kHz, 16 channels (1.8 GB as float32) | `--catalog`, 3 decoys | 0.40 to 0.45 GB | 15 s |
+| 12 h, 48 kHz stereo PCM_16 (8.3 GB) | default: bundled catalog, 720 decoys, 11 render processes | 1.06 GB, plus 3.8 GB in the 11 workers while rendering (4.0 GB in all) | 4.7 min |
+| same | the same with `-j 1` | 1.03 GB | 15.5 min |
+| same | `--find-flyovers` (chaff 0.2, decoys rendered in one process): 9 usable of 20 detected | 1.05 GB, plus 3.7 GB in 12 detection workers for the first 40 min | 57 min, about 40 of it detection |
+| same | `--synthetic`, 720 decoys (chaff 0.2; synthetic rendering is unchanged) | 0.88 GB | 3.2 min |
+| 10 min, 48 kHz, 16 channels (1.8 GB as float32) | `--catalog`, 3 decoys, one process (chaff 0.2) | 0.40 to 0.45 GB | 15 s |
+
+The two runs gave the same decoys, audibility report and output peak. Synthetic decoys are rendered in one
+process.
 
 Detection is dopplertrack's detector run over the whole recording on every core. `--workers N` uses fewer
 processes: slower, less memory.
 
 On macOS the system allocator keeps freed large blocks cached for reuse, and building decoys frees many. The
 `chaff` command turns that cache off (`MallocLargeCache=0`, set by restarting itself once). Before this change the
-same 12 h `--catalog` run peaked at 2.67 GB. It makes decoy rendering about 27% slower. Set `MallocLargeCache=1` to
-keep the cache. When calling chaff from Python on a Mac, set `MallocLargeCache=0` yourself before starting Python.
+same 12 h `--catalog` run peaked at 2.67 GB. It makes decoy rendering about 27% slower. Render workers run without
+the cache too; detection workers keep it. Set `MallocLargeCache=1` to keep the cache everywhere. When calling chaff
+from Python on a Mac, set `MallocLargeCache=0` yourself before starting Python.
+
+## Data
+
+The bundled catalog, `chaff/data/mcmaster.npz` (20 MB), is the default source of decoys. It holds the isolated
+engine lines of 8 propeller-plane flyovers, de-Dopplered (each line a steady tone) and resampled to 2 kHz, from the
+Hamilton Naturalists' Club's McMaster Forest recordings: soundscape recorder HNCSW7, McMaster Forest Nature
+Preserve, Ancaster, Ontario, 27 May 2026, 12 hourly files, Internet Archive item
+[HNCSW720260527](https://archive.org/details/HNCSW720260527). Only the narrow spectrogram bins around the engine
+lines are kept; the rest of the recording is removed.
+
+**Credit: Hamilton Naturalists' Club, via the Internet Archive.** The archive item names the club as creator and
+states no licence for the recordings.
+
+The 8 are the flyovers, among the recording's top 10 dopplertrack detections, with 3 or more distinct engine lines.
+Six of them are loud enough for the lead tier. The development catalog also held 10 flyovers from the club's Safari
+Road recording; none had more than 1 engine line, so none is included.
+[`src/chaff/data/README.md`](src/chaff/data/README.md) lists each stack, and the file carries the same source and
+credit in its metadata (`chaff.catalog_info(chaff.bundled_catalog())`).
 
 ## Catalog format
 
 A catalog is an `.npz` of plain arrays plus JSON metadata, loaded with `allow_pickle=False`, so opening a catalog
 someone else made cannot run code. Each stack keeps its isolated de-Dopplered audio at 2 kHz (float16), its engine
-lines, its isolated SNR and its broadband-roar envelope. The file carries a format name and version; catalogs from
-chaff 0.1 are refused and must be rebuilt with `chaff catalog`.
+lines, its isolated SNR and its broadband-roar envelope. The file carries a format name and version, and may carry
+catalog-wide JSON metadata (`chaff.save_catalog(stacks, path, info={...})`, read with `chaff.catalog_info`).
+Catalogs from chaff 0.1 are refused and must be rebuilt with `chaff catalog`.
 
 ## Responsible use
 
@@ -262,7 +303,7 @@ recordings against a technique that is already public.
   ecology without removing or flagging the decoys (`--report` lists every decoy's time, blade rate, speed and
   distance).
 
-## Data and licences
+## Licences
 
 - **Code:** MIT, see [LICENSE](LICENSE).
 - **dopplertrack:** MIT, Copyright (c) 2026 MacCallister Higgins. chaff calls its detector. `chaff/detect.py`
@@ -271,8 +312,10 @@ recordings against a technique that is already public.
   published under the Open Database License (ODbL 1.0); verify on the
   [adsblol/globe_history](https://github.com/adsblol/globe_history) releases before reusing it. chaff itself uses
   no flight data.
-- **Recordings:** none are redistributed here. McMaster Forest and Safari Road are Hamilton Naturalists' Club
-  recordings on the Internet Archive; their licence is unconfirmed. Oyster Bay is colsto's raw one-hour reference clip
+- **Recordings:** no recording is redistributed here. The bundled catalog holds the isolated engine lines of 8
+  flyovers from the Hamilton Naturalists' Club's McMaster Forest recording (credit: Hamilton Naturalists' Club, via
+  the Internet Archive; no licence is stated on the archive item; see [Data](#data)). Safari Road is another
+  club recording on the Internet Archive. Oyster Bay is colsto's raw one-hour reference clip
   ([youtu.be/4CxVxuMVkMc](https://youtu.be/4CxVxuMVkMc)). The railcam and eagle cam are public YouTube live streams.
 
 ## Development
@@ -280,8 +323,8 @@ recordings against a technique that is already public.
 ```bash
 git clone https://github.com/andrew-medrano/chaff && cd chaff
 pip install -e ".[test,detect]"
-pytest                    # about 2 min; about 3 min with dopplertrack installed
-pytest -m "not slow"      # skips real flyover detection and the memory check
+pytest                    # about 6 min on a 12-core Mac with dopplertrack installed
+pytest -m "not slow"      # skips real flyover detection, the memory check and the wheel build
 ```
 
 Tests that need dopplertrack are skipped when it is not installed; the same code paths also run with a stub
@@ -295,7 +338,7 @@ Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 - colsto, for the [original video](https://www.youtube.com/watch?v=UytYrhYLOKI) and the Oyster Bay recording.
 - MacCallister Higgins, for [dopplertrack](https://github.com/mjshiggins/dopplertrack).
 - [adsb.lol](https://adsb.lol/) and its feeders, for open flight history.
-- The Hamilton Naturalists' Club, for publishing their field recordings.
+- The Hamilton Naturalists' Club, for publishing their field recordings, from which the bundled catalog is made.
 
 If you use chaff in research, please cite the repository:
 
@@ -305,7 +348,7 @@ If you use chaff in research, please cite the repository:
   title  = {chaff: decoy propeller flyovers against acoustic Doppler geolocation},
   year   = {2026},
   url    = {https://github.com/andrew-medrano/chaff},
-  version = {0.2.0}
+  version = {0.3.0}
 }
 ```
 

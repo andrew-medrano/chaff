@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.0 (2026-11-07)
+
+### A catalog ships with chaff, and is the default
+
+- `chaff/data/mcmaster.npz` (20 MB) is package data: the isolated engine lines of 8 propeller-plane flyovers from
+  the Hamilton Naturalists' Club's McMaster Forest recording (Internet Archive item HNCSW720260527). Credit:
+  Hamilton Naturalists' Club, via the Internet Archive; the archive item states no licence. It is the development
+  catalog without its unusable stacks (2 McMaster flyovers with 2 engine lines, and all 10 Safari Road flyovers),
+  so it gives exactly the same decoys for the same seed.
+- `chaff protect` and `chaff.protect()` / `protect_file()` use it when no other source is given. They no longer
+  need dopplertrack and no longer fall back to synthetic decoys on their own.
+- Finding the recording's own flyovers is opt-in: `--find-flyovers` / `find_flyovers=True`. If none is usable it
+  falls back to the bundled catalog with a warning (0.2 fell back to synthetic decoys). Without dopplertrack it
+  is an error.
+- `--catalog` and `--synthetic` are unchanged. The three sources exclude each other; `--synth-*` options need
+  `--synthetic`.
+- Catalogs may carry catalog-wide JSON metadata: `chaff.save_catalog(..., info=...)`, `chaff.catalog_info()`.
+  The bundled catalog's gives its source, link and credit. `chaff.bundled_catalog()` returns its path. The file
+  format version is unchanged (2); chaff 0.2 reads these catalogs.
+- `.gitignore` still ignores `*.npz`, except the bundled file.
+
+### Parallel rendering
+
+- Decoys are rendered in a pool of worker processes: `-j N` / `--jobs N`, `jobs=` in Python (default: all
+  cores but one; 1 = one process). Workers load the catalog once; the main process adds the decoys in order, so
+  the output is bit-identical for any number of jobs (tested). Runs with fewer than 4 decoys per process render
+  in one process. At most 2 rendered decoys per worker wait in the main process.
+- On macOS, render workers inherit the `chaff` command's `MallocLargeCache=0` (detection workers still get the
+  cache back).
+- A script without an `if __name__ == "__main__":` guard gets a warning and renders in one process; its worker
+  processes stop at once instead of running chaff again. Workers read their start-up state (catalog, background)
+  from a private temporary file, which keeps the main process from hanging when a worker dies at start (seen
+  on Python 3.11).
+- The report says how many processes rendered (`render_processes`), and so does the CLI summary.
+
+### Docs and tests
+
+- README: install and quick start without a catalog of your own, a Data section with the credit, a new limit (the
+  bundled catalog is public), and the 12 h timings re-measured.
+- Tests: the bundled catalog loads and carries its credit, the default path uses it, parallel equals serial
+  (bundled catalog, given stacks, files), the no-guard script, the worker environment, and a wheel built from the
+  checkout contains the data. CI also builds a wheel and checks it.
+
 ## 0.2.0 (2026-11-06)
 
 This release is not compatible with 0.1. Catalogs from 0.1 must be rebuilt, and the API and CLI options changed.

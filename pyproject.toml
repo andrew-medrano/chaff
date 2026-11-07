@@ -22,7 +22,7 @@ classifiers = [
 dependencies = ["numpy>=1.24", "scipy>=1.10", "soundfile>=0.12"]
 
 [project.optional-dependencies]
-detect = ["dopplertrack>=0.3"]
+detect = ["dopplertrack>=0.3; python_version >= '3.12'"]   # dopplertrack needs Python 3.12+
 test = ["pytest"]
 
 [project.urls]
@@ -39,3 +39,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+markers = ["slow: takes more than ~10 s (real flyover detection, the memory check); skip with -m 'not slow'"]

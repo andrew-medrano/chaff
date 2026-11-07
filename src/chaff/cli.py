@@ -77,7 +77,7 @@ def cmd_protect(a):
             decoys, rep = protect_file(a.input, a.output, a.catalog, seed=a.seed, lead=_tier(a, "lead", LEAD),
                                        quiet=_tier(a, "quiet", QUIET), synthetic=a.synthetic, synth_opts=so,
                                        subtype=a.subtype, workers=a.workers, log=None if a.silent else _log)
-        except (ValueError, FileNotFoundError, RuntimeError, ImportError) as e:
+        except (ValueError, OSError, RuntimeError, ImportError) as e:
             return _err(e)
     if a.report:
         with open(a.report, "w") as fh:

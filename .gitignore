@@ -15,3 +15,4 @@ dist/
 *.npy
 *.parquet
 *.log
+.DS_Store

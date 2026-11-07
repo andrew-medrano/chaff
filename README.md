@@ -10,6 +10,16 @@ curves against public ADS-B flight tracks can place a recorder, and
 defence: it adds realistic fake flyovers to a
 recording before you publish it, so a search finds many plausible curves and cannot tell which ones to trust.
 
+![Two spectrograms of the same 20 minutes of a forest recording, 40 to 450 Hz. Above, as recorded: a few real
+plane flyovers show as falling curves. Below, after chaff protect: the same curves plus several added decoy
+flyovers, each a stack of parallel falling lines, with orange triangles marking where each decoy passes
+closest.](docs/images/before_after.png)
+
+*The same 20 minutes of the McMaster Forest recording before and after `chaff protect` with default settings.
+The real flyovers are the curves near 7 and 13 minutes; the triangles mark the decoys chaff added. The bundled
+catalog is made from this recording's own planes, so this is the easiest case. Audio: Hamilton Naturalists'
+Club, via the Internet Archive.*
+
 It creates **uncertainty, not complete mitigation**. In our tests the protected search no longer gave a confident
 correct answer, but on the one test recording where the attack worked on clean audio, the true answer stayed narrowly
 the most confident one (see [Results](#results)). Apply it before a recording goes public; it does nothing for copies
@@ -84,6 +94,16 @@ Rendering decoys and finding flyovers both run in worker processes. A script tha
 A propeller plane is not one tone. It is a stack of lines: the blade rate, its harmonics, and engine orders in
 between, all shifted by the same Doppler ratio. A Doppler-curve search fits that shape. A convincing decoy must
 have the whole stack, with the right physics, at a level the search will pick up.
+
+![Three spectrograms side by side. 1: a real flyover, a stack of curved lines sliding down in pitch. 2: the same
+flyover de-Dopplered, where each engine line is a flat horizontal tone and everything else is removed. 3: a decoy
+made from it, the same stack of lines laid onto a new, steeper pass at a lower pitch.](docs/images/how_it_works.png)
+
+*1: a real flyover in the McMaster Forest recording. 2: the same flyover de-Dopplered (time is the warped clock)
+with only its engine-line bins kept; this is stack `mcmaster#3` of the bundled catalog. 3: a decoy made from that
+stack by `stack.render_one` on a new pass: blade rate x0.72, speed x1.2, closest distance x0.65. Panels 2 and 3
+show the isolated lines alone; in a protected file the decoy is added to the recording. Audio: Hamilton
+Naturalists' Club, via the Internet Archive.*
 
 1. **De-Doppler.** chaff takes a real flyover and resamples it on a warped clock that runs fast while the plane
    approaches and slow while it recedes. On that clock the Doppler shift is undone, and every engine line becomes a
@@ -173,6 +193,24 @@ against ADS-B. Area under the ROC curve: 0.5 is chance, 1.0 separates them fully
 
 Only 15 ADS-B-confirmed real flyovers were available, so these AUCs are rough. Decoys made from the same few
 source planes can look alike.
+
+Try it by eye: three of these six flyovers are real and three are decoys.
+
+![Six spectrogram panels labelled A to F, each about 220 seconds around a flyover's closest approach, showing
+stacks of falling curved lines of different pitches. Three are real planes and three are
+decoys.](docs/images/spot_the_fake.png)
+
+*Six flyovers from the McMaster Forest recording (15:30 to 17:30) protected with the research recipe [R]: its three
+strongest real flyovers, and the strongest lead decoy made from each of three source planes. Audio: Hamilton
+Naturalists' Club, via the Internet Archive.*
+
+<details>
+<summary>Answer</summary>
+
+A, C and D are decoys: other McMaster flyovers, re-laid on new passes. B, E and F are real flyovers, confirmed
+against ADS-B.
+
+</details>
 
 ### Loudness [R] and [L]
 
@@ -336,6 +374,10 @@ pytest -m "not slow"      # skips real flyover detection, the memory check and t
 Tests that need dopplertrack are skipped when it is not installed; the same code paths also run with a stub
 detector, so they are covered either way. The ffmpeg test is skipped without ffmpeg. CI runs the suite on Ubuntu
 with Python 3.11, 3.12 and 3.13, without dopplertrack.
+
+`docs/make_figures.py` redraws the figures in this README (`docs/images/`), with matplotlib and Pillow. It needs
+the McMaster Forest recording and, for the spot-the-fake figure, files from the research workspace; its docstring
+lists them.
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 

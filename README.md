@@ -70,7 +70,7 @@ Finding flyovers runs dopplertrack's detector in worker processes, so a script t
    recording's background, measured the way a Doppler-curve search measures it (2 s windows, 0.49 Hz bins).
 3. **Two tiers.**
 
-   | Tier | Per hour | Fundamental, per-bin SNR | Limiter (any auditory band, re background) |
+   | Tier | Per hour | Fundamental through the sweep, per-bin SNR | Limiter (any auditory band, re background) |
    |---|---|---|---|
    | lead | 6 | 28-38 dB | +20 dB |
    | quiet | 54 | 4-10 dB | -7 dB (3 dB under the -4 dB hearing threshold) |

@@ -36,7 +36,7 @@ chaff protect recording.wav protected.wav --report report.json
 ```
 
 chaff builds decoys from the catalog that ships with it (real flyovers recorded in McMaster Forest, see
-[Data](#data)), renders them on all cores but one, and writes the protected file. It prints how loud each tier
+[Data](#data)), renders them on several cores, and writes the protected file. It prints how loud each tier
 of decoys is relative to the recording's background.
 
 Other decoy sources:
@@ -53,8 +53,10 @@ chaff catalog my_catalog.npz day1.wav day1_events.json      # or list them yours
 With `--find-flyovers`, if no plane in the recording has a clear set of engine lines, chaff uses the bundled
 catalog instead and prints a boxed warning. A catalog built from recordings with loud, close planes can be reused.
 
-`-j N` (`--jobs`) sets how many processes render the decoys; `-j 1` renders in one process. The output is the same
-for any `-j`. Runs with only a few decoys render in one process.
+`-j N` (`--jobs`) sets how many processes render the decoys; `-j 1` renders in one process. The default is all
+cores but one, capped at 8 and at as many as fit in half the machine's RAM at 0.65 GB each (`chaff.default_jobs()`).
+The output is the same for any `-j`. Runs with only a few decoys render in one process. `-j` does not apply to
+`--synthetic` (rendered in one process), nor `--workers` to anything but `--find-flyovers`; both are rejected there.
 
 Outputs: `.wav` (32-bit float by default, RF64 past 4 GB), `.flac` (24-bit), `.ogg`, `.mp3`, `.aiff`, `.caf`,
 `.w64`, `.rf64`. Integer and lossy outputs are clipped to full scale and the count of clipped samples is reported.
@@ -220,7 +222,7 @@ tests did not measure.
   it. The tested runs ([R] above) drew on the same McMaster flyovers, plus the 2 weak ones the library drops.
 - **Decoys from the recording's own planes** (`--find-flyovers`) are re-laid copies of those planes.
   That was the setting on McMaster only; it has not been tested on held-out recordings.
-- **Synthetic decoys** (the fallback) have one fundamental and up to three harmonics, no engine-order lines. In a
+- **Synthetic decoys** (`--synthetic`) have one fundamental and up to three harmonics, no engine-order lines. In a
   development check, a random forest told them from real detected flyovers with AUC 0.88 (5-fold cross-validation,
   20 real, 52 decoys). They were not tested against the attack.
 - **Detection misses planes.** On a 12 h test file, dopplertrack's detector found 10 of 24 loud synthetic flyovers;
@@ -238,14 +240,15 @@ tier is built.
 
 Memory depends on duration, not on sample rate or channel count, and grows slowly: about 0.6 to 0.75 GB for one to
 four hours, about 0.9 to 1.06 GB for 12 hours (both on 8 kHz to 48 kHz input), in the main process. Each render
-worker adds about 0.35 GB while the decoys are rendered; `-j 1` has none. Measured with `/usr/bin/time -l` (main
-process) and by summing the RSS of the worker processes every 2 s, on an Apple M3 Pro (12 cores, 18 GB). The
-machine was shared with other jobs: load average 1.3 to 10 for the first two rows, 9 to 60 for the others, which
-are from chaff 0.2 and so on the slow side.
+worker adds about 0.35 to 0.65 GB while the decoys are rendered; `-j 1` has none. That is why the default number
+of workers is capped at 8, and at half the RAM. Measured with `/usr/bin/time -l` (main process) and by summing the
+RSS of the worker processes every 2 s, on an Apple M3 Pro (12 cores, 18 GB). The machine was shared with other
+jobs: load average 1.3 to 10 for the first two rows, 9 to 60 for the others, which are from chaff 0.2 and so on the
+slow side.
 
 | Input | Run | Peak RSS | Time |
 |---|---|---|---|
-| 12 h, 48 kHz stereo PCM_16 (8.3 GB) | default: bundled catalog, 720 decoys, 11 render processes | 1.06 GB, plus 3.8 GB in the 11 workers while rendering (4.0 GB in all) | 4.7 min |
+| 12 h, 48 kHz stereo PCM_16 (8.3 GB) | bundled catalog, 720 decoys, `-j 11` (all cores but one; the default is now 8) | main process 1.06 GB, reached after the workers had exited; the 11 workers 3.8 GB together while rendering, when the main process held 0.26 GB; at most 4.0 GB for all processes at one moment | 4.7 min |
 | same | the same with `-j 1` | 1.03 GB | 15.5 min |
 | same | `--find-flyovers` (chaff 0.2, decoys rendered in one process): 9 usable of 20 detected | 1.05 GB, plus 3.7 GB in 12 detection workers for the first 40 min | 57 min, about 40 of it detection |
 | same | `--synthetic`, 720 decoys (chaff 0.2; synthetic rendering is unchanged) | 0.88 GB | 3.2 min |
@@ -260,8 +263,10 @@ processes: slower, less memory.
 On macOS the system allocator keeps freed large blocks cached for reuse, and building decoys frees many. The
 `chaff` command turns that cache off (`MallocLargeCache=0`, set by restarting itself once). Before this change the
 same 12 h `--catalog` run peaked at 2.67 GB. It makes decoy rendering about 27% slower. Render workers run without
-the cache too; detection workers keep it. Set `MallocLargeCache=1` to keep the cache everywhere. When calling chaff
-from Python on a Mac, set `MallocLargeCache=0` yourself before starting Python.
+the cache too, also when chaff is called from Python: there, with `jobs=2` on 20 min to 2 h of 8 kHz audio, each
+worker peaked at 0.62 GB without the cache and at 2.6 to 3.1 GB with it. Detection workers keep the cache. Set
+`MallocLargeCache` yourself (`1` keeps the cache) and every process inherits your setting. When calling chaff from
+Python on a Mac, the main process keeps the cache unless you set `MallocLargeCache=0` before starting Python.
 
 ## Data
 
@@ -270,7 +275,7 @@ engine lines of 8 propeller-plane flyovers, de-Dopplered (each line a steady ton
 Hamilton Naturalists' Club's McMaster Forest recordings: soundscape recorder HNCSW7, McMaster Forest Nature
 Preserve, Ancaster, Ontario, 27 May 2026, 12 hourly files, Internet Archive item
 [HNCSW720260527](https://archive.org/details/HNCSW720260527). Only the narrow spectrogram bins around the engine
-lines are kept; the rest of the recording is removed.
+lines are kept; the rest of the recording is removed, though anything else that fell inside those bins remains.
 
 **Credit: Hamilton Naturalists' Club, via the Internet Archive.** The archive item names the club as creator and
 states no licence for the recordings.
@@ -312,10 +317,11 @@ recordings against a technique that is already public.
   published under the Open Database License (ODbL 1.0); verify on the
   [adsblol/globe_history](https://github.com/adsblol/globe_history) releases before reusing it. chaff itself uses
   no flight data.
-- **Recordings:** no recording is redistributed here. The bundled catalog holds the isolated engine lines of 8
-  flyovers from the Hamilton Naturalists' Club's McMaster Forest recording (credit: Hamilton Naturalists' Club, via
-  the Internet Archive; no licence is stated on the archive item; see [Data](#data)). Safari Road is another
-  club recording on the Internet Archive. Oyster Bay is colsto's raw one-hour reference clip
+- **Recordings:** no full recording is redistributed here. The bundled catalog contains audio derived from the
+  recordings: the isolated engine lines (float16, 2 kHz) of 8 flyovers from the Hamilton Naturalists' Club's
+  McMaster Forest recording, with anything else that fell inside those narrow bins (credit: Hamilton Naturalists'
+  Club, via the Internet Archive; no licence is stated on the archive item; see [Data](#data)). Safari Road is
+  another club recording on the Internet Archive. Oyster Bay is colsto's raw one-hour reference clip
   ([youtu.be/4CxVxuMVkMc](https://youtu.be/4CxVxuMVkMc)). The railcam and eagle cam are public YouTube live streams.
 
 ## Development

@@ -122,3 +122,72 @@ def test_worker_env_follows_the_main_process(monkeypatch):
     monkeypatch.setenv("MallocLargeCache", "1")                   # the user's own setting wins
     with render._worker_env():
         assert os.environ["MallocLargeCache"] == "1"
+    # called from Python (no `chaff` command): render workers still run without the cache
+    monkeypatch.delenv("MallocLargeCache")
+    monkeypatch.delenv("_CHAFF_MALLOC_LARGE_CACHE")
+    with render._worker_env():
+        assert os.environ["MallocLargeCache"] == "0"
+    assert "MallocLargeCache" not in os.environ
+    monkeypatch.setattr(sys, "platform", "linux")
+    with render._worker_env():
+        assert "MallocLargeCache" not in os.environ
+
+
+def test_default_jobs_is_capped(monkeypatch):
+    monkeypatch.setattr(render, "_ram_bytes", lambda: None)
+    for cpus, want in ((1, 1), (2, 1), (4, 3), (12, 8), (64, 8)):
+        monkeypatch.setattr(render, "_cpus", lambda: cpus)
+        assert render.default_jobs() == want
+    monkeypatch.setattr(render, "_cpus", lambda: 64)
+    monkeypatch.setattr(render, "_ram_bytes", lambda: 4e9)       # half of 4 GB at 0.65 GB a worker
+    assert render.default_jobs() == 3
+    monkeypatch.setattr(render, "_ram_bytes", lambda: 1e9)
+    assert render.default_jobs() == 1
+    assert render.check_jobs(None) == 1 and render.check_jobs(20) == 20      # an explicit number is kept
+
+
+class _Pool:
+    """Stands in for the process pool: renders the first `ok` decoys in this process, then breaks."""
+    def __init__(self, stacks, floor, ok):
+        self.stacks, self.floor, self.ok, self.n = stacks, floor, ok, 0
+
+    def submit(self, fn, dc, n_syn, max_span_s):
+        from concurrent.futures import Future
+        from concurrent.futures.process import BrokenProcessPool
+        from chaff import stack
+        f = Future()
+        if self.n < self.ok:
+            f.set_result(stack.render_one(dc, self.stacks[dc.src], n_syn, self.floor, max_span_s))
+        else:
+            f.set_exception(BrokenProcessPool("a child process terminated abruptly"))
+        self.n += 1
+        return f
+
+    def shutdown(self, cancel_futures=False):
+        pass
+
+
+@pytest.mark.parametrize("ok", [0, 5])
+def test_broken_pool_blames_the_guard_only_at_start(monkeypatch, ok):
+    # a pool that breaks before any decoy came back looks like a script without a main guard; one
+    # that breaks later (a worker killed for memory, say) gets a different message. Either way the
+    # tier is rendered again in one process, with the same result.
+    from chaff import stack
+    from chaff.noise import noise_floor
+    sr = 8000
+    x = pink(sr * 600, sr, seed=3)
+    floor = noise_floor(x, sr)
+    ks = stack.load(chaff.bundled_catalog())
+    dc = stack.sample(ks, 600, 60.0, (4.0, 10.0), 6.0, seed=2, edge_s=150)
+    want = stack.render(dc, ks, len(x), sr, floor)
+    rr = render.Renderer(ks, floor, jobs=2)
+
+    def pool(n):
+        rr.pool, rr.n_pool = _Pool(ks, floor, ok), n
+        return rr.pool
+    monkeypatch.setattr(rr, "_pool", pool)
+    with pytest.warns(RuntimeWarning) as w:
+        y, skipped = rr.render(dc, len(x), sr)
+    msg = str(w[0].message)
+    assert ("guard" in msg) == (ok == 0) and ("died while rendering" in msg) == (ok > 0)
+    assert rr.used == 1 and rr.jobs == 1 and np.array_equal(y, want[0]) and skipped == want[1]

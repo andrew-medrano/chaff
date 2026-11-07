@@ -39,3 +39,33 @@ def test_peak_memory_is_well_below_the_recording(tmp_path, catalog_path):
     info = sf.info(str(dst))
     assert info.frames == sr * 60 * minutes and info.channels == ch
     assert peak < 0.4 * in_memory, f"peak RSS {peak / 1e6:.0f} MB for a {in_memory / 1e6:.0f} MB recording"
+
+
+# render workers started from Python (not the `chaff` command): on macOS they run without the
+# allocator's large-block cache, so each stays near 0.6 GB (2.6 to 3.1 GB each with the cache).
+# ru_maxrss of RUSAGE_CHILDREN is the largest worker, once the pool has shut down.
+API_WORKERS = """
+import resource, sys
+sys.path.insert(0, sys.argv[1])
+import chaff
+from conftest import pink
+if __name__ == "__main__":
+    x = pink(8000 * 60 * 20, 8000, seed=5)
+    _, decoys, rep = chaff.protect(x, 8000, seed=1, jobs=2)
+    assert rep["render_processes"] == 2, rep["render_processes"]
+    print(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * (1 if sys.platform == "darwin" else 1024))
+"""
+
+
+@pytest.mark.slow
+def test_api_render_workers_stay_small(tmp_path):
+    import os
+    from pathlib import Path
+    script = tmp_path / "api_workers.py"
+    script.write_text(API_WORKERS)
+    env = {k: v for k, v in os.environ.items() if k not in ("MallocLargeCache", "_CHAFF_MALLOC_LARGE_CACHE")}
+    r = run_py(script, Path(__file__).resolve().parent, env=env, timeout=600)
+    assert r.returncode == 0, r.stderr
+    peak = int(r.stdout.split()[-1])
+    print(f"largest render worker {peak / 1e9:.2f} GB")
+    assert peak < 1.2e9, f"a render worker peaked at {peak / 1e9:.2f} GB"

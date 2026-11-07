@@ -28,11 +28,33 @@ from . import stack
 from .synth import track_len
 
 MIN_PER_JOB = 4          # fewer decoys than this per process: starting the processes costs more than it saves
+MAX_DEFAULT_JOBS = 8     # the default never starts more render processes than this
+WORKER_BYTES = 0.65e9    # peak RSS of one render worker (measured: 0.35 to 0.63 GB, allocator cache off)
+RAM_SHARE = 0.5          # by default, render workers may take at most this share of the physical memory
+
+
+def _cpus() -> int:
+    n = os.process_cpu_count() if hasattr(os, "process_cpu_count") else None   # Python 3.13+: affinity
+    return n or os.cpu_count() or 1
+
+
+def _ram_bytes():
+    """Physical memory, or None where it cannot be read (e.g. Windows)."""
+    try:
+        return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, ValueError, OSError):
+        return None
 
 
 def default_jobs() -> int:
-    """All cores but one."""
-    return max((os.cpu_count() or 1) - 1, 1)
+    """All cores but one, but at most MAX_DEFAULT_JOBS (8), and no more workers than fit in half
+    the physical memory at WORKER_BYTES (0.65 GB) each, since memory grows with the number of
+    workers. Pass jobs explicitly to use more."""
+    n = min(_cpus() - 1, MAX_DEFAULT_JOBS)
+    ram = _ram_bytes()
+    if ram:
+        n = min(n, int(RAM_SHARE * ram // WORKER_BYTES))
+    return max(n, 1)
 
 
 def check_jobs(jobs):
@@ -66,15 +88,17 @@ def _one(dc, n_syn, max_span_s):
 
 @contextmanager
 def _worker_env():
-    """On macOS the `chaff` command runs with the allocator's large-block cache off
-    (MallocLargeCache=0, see cli.entry) but takes the variable out of the environment so that
-    detection workers get the cache back. Render workers free large blocks all the time, like
-    the main process, so they get the main process's setting: with the cache, each of them
-    would keep up to ~1.5 GB it no longer uses."""
-    want = os.environ.get("_CHAFF_MALLOC_LARGE_CACHE")
-    if sys.platform != "darwin" or want is None or "MallocLargeCache" in os.environ:
+    """On macOS, render workers run with the allocator's large-block cache off
+    (MallocLargeCache=0): they free large blocks all the time, and with the cache each of them
+    keeps GBs it no longer uses (measured through the API, 8 kHz input, 20 min to 2 h: 2.6 to
+    3.1 GB per worker with the cache, 0.62 GB without). This holds whether chaff was started as
+    the `chaff` command or called from Python. The command runs with the cache off itself (see
+    cli.entry) but takes the variable out of the environment so that detection workers get the
+    cache back; _CHAFF_MALLOC_LARGE_CACHE carries its setting here. A MallocLargeCache the user set is left alone (workers inherit it)."""
+    if sys.platform != "darwin" or "MallocLargeCache" in os.environ:
         yield
         return
+    want = os.environ.get("_CHAFF_MALLOC_LARGE_CACHE", "0")
     os.environ["MallocLargeCache"] = want
     try:
         yield
@@ -97,6 +121,7 @@ class Renderer:
         self.state = None
         self.env = ExitStack()
         self.used = 1            # processes the last render() used
+        self.started = False     # a worker has returned a result: the pool did start
 
     def __enter__(self):
         return self
@@ -148,13 +173,19 @@ class Renderer:
             self.used = self.n_pool
             return out
         except (BrokenProcessPool, BrokenPipeError, EOFError):
-            # worker processes died or could not start: typically a script without an
-            # `if __name__ == "__main__":` guard (macOS and Windows start workers by importing it)
             self.close()
             self.jobs = 1
-            warnings.warn("rendering decoys in worker processes failed (does your script lack an "
-                          "`if __name__ == '__main__':` guard?); continuing in one process", RuntimeWarning)
-            self.log("  worker processes failed; rendering in one process")
+            if not self.started:
+                # the workers died before any of them returned a decoy: typically a script without
+                # an `if __name__ == "__main__":` guard (macOS and Windows start workers by importing it)
+                msg = ("worker processes stopped at start-up (does your script lack an "
+                       "`if __name__ == '__main__':` guard?)")
+            else:
+                # a worker that had been rendering died, e.g. killed for running out of memory
+                msg = ("a worker process died while rendering decoys (out of memory, or killed?); "
+                       "try fewer jobs")
+            warnings.warn(f"{msg}; rendering this tier again in one process", RuntimeWarning)
+            self.log(f"  {msg}; rendering this tier again in one process")
             self.used = 1
             return stack.render(decoys, self.stacks, n_samples, sr, self.floor, max_span_s, progress)
 
@@ -173,6 +204,7 @@ class Renderer:
         while pending:
             dc, fut = pending.popleft()
             out = fut.result()
+            self.started = True
             nxt = next(todo, None)
             if nxt is not None:
                 pending.append((nxt, pool.submit(_one, nxt, n_syn, max_span_s)))

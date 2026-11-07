@@ -73,6 +73,10 @@ def cmd_protect(a):
         return _err("--jobs must be 1 or more")
     if a.synthetic and tier_given:
         return _err("--lead-* / --quiet-* options only apply to stack decoys, not with --synthetic")
+    if a.synthetic and a.jobs is not None:
+        return _err("--jobs only applies to stack decoys; synthetic decoys are rendered in one process")
+    if a.workers is not None and not a.find_flyovers:
+        return _err("--workers only applies to flyover detection (--find-flyovers)")
     so = Synthetic(per_hour=SYNTHETIC.per_hour if a.synth_per_hour is None else a.synth_per_hour,
                    below_db=SYNTHETIC.below_db if a.synth_below is None else tuple(a.synth_below),
                    limit_db=SYNTHETIC.limit_db)
@@ -165,13 +169,14 @@ def main(argv=None):
                           "(needs chaff[detect]); falls back to the bundled catalog if none is usable")
     src.add_argument("--synthetic", action="store_true", help="use synthetic decoys (easier to tell apart)")
     pp.add_argument("-j", "--jobs", type=int, metavar="N",
-                    help=f"processes that render the decoys (default: all cores but one, here {default_jobs()}; "
-                         "1 = one process); the output does not depend on it")
+                    help=f"processes that render the decoys (default: all cores but one, at most 8 and at most "
+                         f"what fits in half the RAM at 0.65 GB each; here {default_jobs()}; 1 = one process); "
+                         "the output does not depend on it. Not with --synthetic")
     pp.add_argument("--seed", type=int, default=0)
     pp.add_argument("--report", metavar="JSON", help="write the decoy list and the audibility report")
     pp.add_argument("--subtype", help="output sample format, e.g. PCM_16, PCM_24, FLOAT (default: FLOAT for "
                                       "wav-like files, PCM_24 for flac)")
-    pp.add_argument("--workers", type=int, help="processes for flyover detection with --find-flyovers "
+    pp.add_argument("--workers", type=int, help="processes for flyover detection, with --find-flyovers only "
                                                  "(default: all cores)")
     pp.add_argument("--silent", action="store_true", help="no progress messages")
     g = pp.add_argument_group("stack decoy tiers (defaults: the tested recipe)")

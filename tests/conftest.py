@@ -51,12 +51,14 @@ def catalog_path(stacks, tmp_path_factory):
 SRC = __import__("pathlib").Path(__import__("chaff").__file__).resolve().parents[1]
 
 
-def run_py(*args, **kw):
-    """`python ARGS` in a fresh process, with this checkout's chaff first on the path."""
+def run_py(*args, env=None, **kw):
+    """`python ARGS` in a fresh process, with this checkout's chaff first on the path. env: the
+    environment to start from (default: this one)."""
     import os
     import subprocess
     import sys
-    env = dict(os.environ, PYTHONPATH=os.pathsep.join([str(SRC), *filter(None, [os.environ.get("PYTHONPATH")])]))
+    env = dict(os.environ if env is None else env)
+    env["PYTHONPATH"] = os.pathsep.join([str(SRC), *filter(None, [env.get("PYTHONPATH")])])
     return subprocess.run([sys.executable, *map(str, args)], capture_output=True, text=True, env=env, **kw)
 
 

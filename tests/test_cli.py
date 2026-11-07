@@ -92,6 +92,12 @@ def test_errors_exit_nonzero(tmp_path, capsys):
     assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--catalog", "c.npz", "--find-flyovers"]) == 2
     assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--synth-per-hour", "3"]) == 2
     assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "-j", "0"]) == 2
+    capsys.readouterr()
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--synthetic", "-j", "2"]) == 2
+    assert "--jobs only applies to stack decoys" in capsys.readouterr().err
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--workers", "2"]) == 2
+    assert "--workers only applies to flyover detection" in capsys.readouterr().err
+    assert cli.main(["protect", str(src), str(tmp_path / "o.wav"), "--synthetic", "--workers", "2"]) == 2
     short = tmp_path / "short.wav"
     sf.write(short, pink(sr * 30, sr), sr)
     assert cli.main(["protect", str(short), str(tmp_path / "o.wav"), "--synthetic"]) == 2

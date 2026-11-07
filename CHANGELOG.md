@@ -23,12 +23,19 @@
 
 ### Parallel rendering
 
-- Decoys are rendered in a pool of worker processes: `-j N` / `--jobs N`, `jobs=` in Python (default: all
-  cores but one; 1 = one process). Workers load the catalog once; the main process adds the decoys in order, so
+- Decoys are rendered in a pool of worker processes: `-j N` / `--jobs N`, `jobs=` in Python (default:
+  `chaff.default_jobs()`, all cores but one, at most 8 and at most as many as fit in half the physical memory at
+  0.65 GB each; 1 = one process). Workers load the catalog once; the main process adds the decoys in order, so
   the output is bit-identical for any number of jobs (tested). Runs with fewer than 4 decoys per process render
   in one process. At most 2 rendered decoys per worker wait in the main process.
-- On macOS, render workers inherit the `chaff` command's `MallocLargeCache=0` (detection workers still get the
-  cache back).
+- On macOS, render workers run with `MallocLargeCache=0`, from the `chaff` command and from Python alike, unless
+  `MallocLargeCache` is set (detection workers still get the cache back). Called from Python with the cache, a
+  worker peaked at 2.6 to 3.1 GB; without it, 0.62 GB.
+- A worker that dies after rendering has started (out of memory, say) gets its own warning; only a pool that
+  fails before any decoy comes back is blamed on a missing main guard. Either way the tier is rendered again in one
+  process.
+- `chaff protect` rejects `-j` with `--synthetic` and `--workers` without `--find-flyovers` (both were ignored).
+- `chaff.bundled_catalog()` works when chaff is imported from a zip: the file is copied out once per process.
 - A script without an `if __name__ == "__main__":` guard gets a warning and renders in one process; its worker
   processes stop at once instead of running chaff again. Workers read their start-up state (catalog, background)
   from a private temporary file, which keeps the main process from hanging when a worker dies at start (seen
@@ -37,11 +44,14 @@
 
 ### Docs and tests
 
-- README: install and quick start without a catalog of your own, a Data section with the credit, a new limit (the
-  bundled catalog is public), and the 12 h timings re-measured.
+- README: install and quick start without a catalog of your own, a Data section with the credit (and what of
+  the recordings the catalog keeps), a new limit (the bundled catalog is public), and the 12 h timings
+  re-measured.
 - Tests: the bundled catalog loads and carries its credit, the default path uses it, parallel equals serial
-  (bundled catalog, given stacks, files), the no-guard script, the worker environment, and a wheel built from the
-  checkout contains the data. CI also builds a wheel and checks it.
+  (bundled catalog, given stacks, files), the no-guard script, the worker environment (also from Python), the
+  capped default number of jobs, the two pool-failure messages, render-worker memory through the API, the bundled
+  catalog from a zip import, and a wheel built from the checkout contains the data. CI also builds a wheel and
+  checks it.
 
 ## 0.2.0 (2026-11-06)
 

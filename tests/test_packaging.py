@@ -39,3 +39,29 @@ def test_wheel_contains_the_catalog(tmp_path):
         for f in DATA:
             assert f in names
         assert z.getinfo(DATA[0]).file_size == (SRC / DATA[0]).stat().st_size
+
+
+ZIPPED = """
+import os, sys, zipfile
+import chaff
+from chaff import stack
+assert ".zip" in chaff.__file__, chaff.__file__
+p = chaff.bundled_catalog()
+assert os.path.isfile(p) and p == chaff.bundled_catalog(), p     # copied out once, kept for the process
+assert len(stack.load(p)) == 8 and "Hamilton" in chaff.catalog_info(p)["credit"]
+print(p)
+"""
+
+
+def test_bundled_catalog_from_a_zip(tmp_path):
+    # chaff imported from a zip (a zipapp, say): the catalog is not a file on disk, so it is copied out
+    zp = tmp_path / "chaff.zip"
+    with zipfile.ZipFile(zp, "w") as z:
+        for f in (SRC / "chaff").rglob("*"):
+            if f.is_file() and "__pycache__" not in f.parts:
+                z.write(f, f.relative_to(SRC).as_posix())
+    env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(zp)
+    r = subprocess.run([sys.executable, "-c", ZIPPED], capture_output=True, text=True, env=env, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert not Path(r.stdout.strip()).exists()                    # removed when the process exits

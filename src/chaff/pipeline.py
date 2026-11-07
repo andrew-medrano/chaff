@@ -341,9 +341,10 @@ def protect(x, sr, catalog=None, *, find_flyovers=False, synthetic=False, seed=0
     - synthetic=True: synthetic decoys (easier to tell from real planes).
 
     lead, quiet: the two tiers (Tier); the defaults are the tested recipe. synth_opts: settings
-    for synthetic decoys. jobs: processes that render the decoys (None = all cores but one,
-    1 = this process only); the result does not depend on it. workers: processes for flyover
-    detection (None = all cores).
+    for synthetic decoys. jobs: processes that render the decoys (None = default_jobs(): all
+    cores but one, at most 8 and no more than fit in half the RAM; 1 = this process only); the
+    result does not depend on it. On macOS the render workers run with MallocLargeCache=0
+    unless it is set. workers: processes for flyover detection (None = all cores).
 
     Returns (y, decoys, report): protected audio with the shape of x (float32), the list of
     decoys (stack.StackDecoy, or synth.Decoy for synthetic decoys), and a report dict with

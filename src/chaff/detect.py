@@ -1,8 +1,10 @@
 """Finding the flyovers in a recording, with dopplertrack's detector (optional dependency).
 
-chaff builds its decoys from real flyovers. When no catalog is given, it lifts them out of the
-recording being protected: the detector scans the recording for Doppler-shaped curves, and each
-detection with a clear engine-line stack becomes a decoy source.
+chaff builds its decoys from real flyovers, by default from the catalog that ships with it. With
+find_flyovers=True (`--find-flyovers`) it lifts them out of the recording being protected instead:
+the detector scans the recording for Doppler-shaped curves, and each detection with a clear
+engine-line stack becomes a decoy source (if none has one, the bundled catalog is used). `chaff
+catalog` uses the same detector on recordings given without an events file.
 
 The spectrogram dopplertrack's detector needs (0.25 s hop, 0.49 Hz bins, 40-450 Hz, whitened
 over 10 minutes) is computed here from the same 4 kHz stream as the background, in pieces of

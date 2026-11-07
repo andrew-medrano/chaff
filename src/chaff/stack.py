@@ -14,9 +14,11 @@ pickle, so loading a catalog someone else made cannot run code).
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import zipfile
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 
 import numpy as np
@@ -189,13 +191,32 @@ BUNDLED = "mcmaster.npz"     # in chaff/data
 def bundled_path() -> str:
     """Path of the catalog that ships with chaff (chaff/data/mcmaster.npz): engine-line stacks
     of 8 flyovers from the Hamilton Naturalists' Club's McMaster Forest recordings, via the
-    Internet Archive. load_info() of it gives the source and credit."""
-    from importlib.resources import files
+    Internet Archive. load_info() of it gives the source and credit.
+
+    When chaff is imported from a zip (a zipapp, say) the file is copied out to a temporary file
+    once, which lasts until the process exits, since render workers open it by path."""
+    global _EXTRACTED
+    from importlib.resources import as_file, files
     p = files("chaff").joinpath("data", BUNDLED)
     if not p.is_file():
         raise FileNotFoundError(f"the bundled catalog {p} is missing from this chaff installation; "
                                 "reinstall chaff, or pass a catalog")
-    return os.fspath(p)
+    try:
+        return os.fspath(p)
+    except TypeError:
+        pass                     # not a file on disk (zip import)
+    if _EXTRACTED is None or not os.path.isfile(_EXTRACTED):
+        keep = ExitStack()
+        try:
+            _EXTRACTED = os.fspath(keep.enter_context(as_file(p)))
+        except (OSError, TypeError) as e:
+            raise FileNotFoundError(f"cannot read the bundled catalog from this chaff installation ({e}); "
+                                    "pass a catalog") from e
+        atexit.register(keep.close)
+    return _EXTRACTED
+
+
+_EXTRACTED = None                # the bundled catalog copied out of a zip, for this process
 
 
 def save(stacks, path, info=None):

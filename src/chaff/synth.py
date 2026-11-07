@@ -2,9 +2,10 @@
 types and then stretched, shrunk and pitch-shifted, with harmonics, rendered just under the level
 the ear could pick out of the recording's own background.
 
-These are the fallback when no catalog of real flyovers is available. They are simpler than the
-whole-stack decoys in stack.py (a fundamental and up to three harmonics, no engine-order lines),
-so they are easier to tell from real flyovers.
+They are used only when asked for (synthetic=True, `--synthetic`); every other run makes its
+decoys from real flyovers. They are simpler than the whole-stack decoys in stack.py (a
+fundamental and up to three harmonics, no engine-order lines), so they are easier to tell from
+real flyovers.
 """
 from __future__ import annotations
 

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+# never commit audio, catalogs or flight data
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.webm
+*.npz
+*.npy
+*.parquet
+*.log

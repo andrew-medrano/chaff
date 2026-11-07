@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chaff"
+version = "0.1.0"
+description = "Add faint, physically consistent decoy propeller flyovers to outdoor recordings to mislead acoustic geolocation by Doppler-curve matching."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["numpy", "scipy", "soundfile"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+chaff = "chaff.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
